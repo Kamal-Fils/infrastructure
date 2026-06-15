@@ -3,6 +3,10 @@
 *.env
 !.env.example
 
+# RabbitMQ : definitions.json rendu contient le mot de passe broker EN CLAIR.
+# Seul le template (definitions.tpl.json) est committé.
+apps/jangubi/rabbitmq/definitions.json
+
 # Certificats / stockage ACME Traefik
 acme.json
 letsencrypt/

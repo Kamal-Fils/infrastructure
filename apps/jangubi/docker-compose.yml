@@ -172,8 +172,18 @@ services:
     image: rabbitmq:3.13-management-alpine
     container_name: jangubi_rabbitmq
     restart: unless-stopped
+    environment:
+      # Appliqués SEULEMENT à la 1re init (volume vide). Sur un volume existant,
+      # le broker user est garanti par le definitions file (load_definitions).
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS}
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
+      # rabbitmq.conf : committé. definitions.json : généré par
+      # `make jangubi-rabbitmq-definitions` AVANT tout `up` (sinon Docker crée un
+      # dossier vide à la place → load_definitions échoue).
+      - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+      - ./rabbitmq/definitions.json:/etc/rabbitmq/definitions.json:ro
     networks:
       - jangubi-internal
     healthcheck:
