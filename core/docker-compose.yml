@@ -1,0 +1,190 @@
+# ==============================================================================
+# CORE — Services partagés du serveur Kamal&Fils (164.92.238.231 / kamalfils.app)
+#
+# Ce stack tourne UNE SEULE FOIS sur le serveur. Il fournit l'infra mutualisée
+# pour toutes les applications :
+#   - traefik       reverse-proxy + TLS Let's Encrypt (le SEUL à exposer 80/443)
+#   - portainer     gestion des conteneurs Docker via UI
+#   - minio         stockage objet S3-compatible (médias, uploads des apps)
+#   - uptime-kuma   monitoring de disponibilité
+#   - grafana       dashboards / métriques
+#
+# Le réseau `traefik-public` est CRÉÉ ici et déclaré `external` dans chaque app
+# (apps/<name>/docker-compose.yml) — les apps s'y branchent pour être routées.
+#
+# Démarrage :  make core-up        (depuis infrastructure/)
+# ==============================================================================
+
+services:
+  # ===========================================================================
+  # Traefik v3.3 — reverse proxy, TLS automatique, redirection HTTP→HTTPS
+  # ===========================================================================
+  traefik:
+    image: traefik:v3.3
+    container_name: traefik
+    restart: unless-stopped
+    command:
+      # -- Dashboard / API interne (exposée derrière basic-auth, voir labels) --
+      - "--api.dashboard=true"
+      # -- Provider Docker : Traefik lit les labels des conteneurs ----------------
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=traefik-public"
+      # -- Points d'entrée -------------------------------------------------------
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      # -- Redirection globale HTTP -> HTTPS -------------------------------------
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--entrypoints.web.http.redirections.entrypoint.permanent=true"
+      # -- Let's Encrypt (HTTP challenge sur l'entrypoint web) -------------------
+      - "--certificatesresolvers.letsencrypt.acme.email=${TRAEFIK_ACME_EMAIL}"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+      - "--certificatesresolvers.letsencrypt.acme.httpchallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
+      # -- Logs ------------------------------------------------------------------
+      - "--log.level=INFO"
+      - "--accesslog=true"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik_letsencrypt:/letsencrypt
+    networks:
+      - traefik-public
+    labels:
+      - "traefik.enable=true"
+      # Routeur dashboard -> traefik.kamalfils.app (HTTPS + basic auth)
+      - "traefik.http.routers.traefik.rule=Host(`traefik.kamalfils.app`)"
+      - "traefik.http.routers.traefik.entrypoints=websecure"
+      - "traefik.http.routers.traefik.tls=true"
+      - "traefik.http.routers.traefik.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.traefik.service=api@internal"
+      - "traefik.http.routers.traefik.middlewares=traefik-auth"
+      # ${TRAEFIK_DASHBOARD_AUTH} = sortie de `htpasswd -nb admin <pass>`,
+      # avec CHAQUE '$' DOUBLÉ en '$$' dans .env — sinon Compose interprète
+      # $apr1/$xxx comme des variables et tronque le hash (auth cassée).
+      - "traefik.http.middlewares.traefik-auth.basicauth.users=${TRAEFIK_DASHBOARD_AUTH}"
+
+  # ===========================================================================
+  # Portainer CE — gestion des conteneurs -> portainer.kamalfils.app
+  # ===========================================================================
+  portainer:
+    image: portainer/portainer-ce:latest
+    container_name: portainer
+    restart: unless-stopped
+    command: -H unix:///var/run/docker.sock
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - portainer_data:/data
+    networks:
+      - traefik-public
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.portainer.rule=Host(`portainer.kamalfils.app`)"
+      - "traefik.http.routers.portainer.entrypoints=websecure"
+      - "traefik.http.routers.portainer.tls=true"
+      - "traefik.http.routers.portainer.tls.certresolver=letsencrypt"
+      - "traefik.http.services.portainer.loadbalancer.server.port=9000"
+
+  # ===========================================================================
+  # MinIO — stockage S3 partagé
+  #   API S3   -> s3.kamalfils.app      (port 9000)  utilisé par les apps
+  #   Console  -> bucket.kamalfils.app  (port 9001)  UI d'administration
+  # ===========================================================================
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      # La console redirige vers son domaine public après login
+      MINIO_BROWSER_REDIRECT_URL: https://bucket.kamalfils.app
+    volumes:
+      - minio_data:/data
+    networks:
+      - traefik-public
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    labels:
+      - "traefik.enable=true"
+      # --- API S3 (9000) -> s3.kamalfils.app ---
+      - "traefik.http.routers.minio-api.rule=Host(`s3.kamalfils.app`)"
+      - "traefik.http.routers.minio-api.entrypoints=websecure"
+      - "traefik.http.routers.minio-api.tls=true"
+      - "traefik.http.routers.minio-api.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.minio-api.service=minio-api"
+      - "traefik.http.services.minio-api.loadbalancer.server.port=9000"
+      # --- Console (9001) -> bucket.kamalfils.app ---
+      - "traefik.http.routers.minio-console.rule=Host(`bucket.kamalfils.app`)"
+      - "traefik.http.routers.minio-console.entrypoints=websecure"
+      - "traefik.http.routers.minio-console.tls=true"
+      - "traefik.http.routers.minio-console.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.minio-console.service=minio-console"
+      - "traefik.http.services.minio-console.loadbalancer.server.port=9001"
+
+  # ===========================================================================
+  # Uptime Kuma — monitoring de disponibilité -> uptime.kamalfils.app
+  # ===========================================================================
+  uptime-kuma:
+    image: louislam/uptime-kuma:latest
+    container_name: uptime-kuma
+    restart: unless-stopped
+    volumes:
+      - uptime_kuma_data:/app/data
+    networks:
+      - traefik-public
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.uptime.rule=Host(`uptime.kamalfils.app`)"
+      - "traefik.http.routers.uptime.entrypoints=websecure"
+      - "traefik.http.routers.uptime.tls=true"
+      - "traefik.http.routers.uptime.tls.certresolver=letsencrypt"
+      - "traefik.http.services.uptime.loadbalancer.server.port=3001"
+
+  # ===========================================================================
+  # Grafana — dashboards / métriques -> grafana.kamalfils.app
+  # ===========================================================================
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_SERVER_ROOT_URL: https://grafana.kamalfils.app
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - traefik-public
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.grafana.rule=Host(`grafana.kamalfils.app`)"
+      - "traefik.http.routers.grafana.entrypoints=websecure"
+      - "traefik.http.routers.grafana.tls=true"
+      - "traefik.http.routers.grafana.tls.certresolver=letsencrypt"
+      - "traefik.http.services.grafana.loadbalancer.server.port=3000"
+
+# ==============================================================================
+# Volumes nommés (persistance gérée par Docker)
+# ==============================================================================
+volumes:
+  traefik_letsencrypt:
+  portainer_data:
+  minio_data:
+  uptime_kuma_data:
+  grafana_data:
+
+# ==============================================================================
+# Réseau partagé — créé par CE stack, référencé en `external` par les apps.
+# Nom explicite (sans préfixe projet) pour que les apps le retrouvent.
+# ==============================================================================
+networks:
+  traefik-public:
+    name: traefik-public
+    driver: bridge

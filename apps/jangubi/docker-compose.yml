@@ -1,0 +1,204 @@
+# ==============================================================================
+# APP — JanguBi (Jàngu Bi) en production sur kamalfils.app
+#
+#   django   -> api-jangubi.kamalfils.app   (Daphne / ASGI, port 8000)
+#   nextjs   -> jangubi.kamalfils.app        (Next.js standalone, port 3000)
+#   celery   worker asynchrone (apps.tasks)
+#   beats    planificateur (django-celery-beat, scheduler en base)
+#   db       PostgreSQL + pgvector          (interne, jamais exposé)
+#   redis    cache + Channel Layers          (interne)
+#   rabbitmq broker Celery                   (interne)
+#
+# Les images viennent de DockerHub, construites par la CI :
+#   ${DOCKERHUB_USERNAME}/jangubi-backend:${TAG}
+#   ${DOCKERHUB_USERNAME}/jangubi-frontend:${TAG}
+#
+# Réseaux :
+#   traefik-public    EXTERNAL — créé par core/, sert l'ingress (django, nextjs)
+#   jangubi-internal  privé au stack — db/redis/rabbitmq/celery/beats
+#
+# Déploiement :  make jangubi-deploy TAG=sha-xxxxxxx   (depuis infrastructure/)
+# ==============================================================================
+
+# Base commune aux 3 services qui partagent l'image backend.
+x-backend: &backend
+  image: ${DOCKERHUB_USERNAME}/jangubi-backend:${TAG:-latest}
+  restart: unless-stopped
+  env_file:
+    # Fichier unique à la racine d'infrastructure/ (relatif à CE compose).
+    - ../../.env
+  networks:
+    - jangubi-internal
+
+services:
+  # ===========================================================================
+  # Django (ASGI / Daphne) — seul service backend exposé à Traefik
+  # L'entrypoint applique les migrations PUIS démarre Daphne.
+  # ===========================================================================
+  django:
+    <<: *backend
+    container_name: jangubi_django
+    entrypoint: ["/docker-entrypoint.sh"]
+    command: daphne -b 0.0.0.0 -p 8000 config.asgi:application
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - jangubi-internal
+      - traefik-public
+    healthcheck:
+      # Port ouvert => migrations terminées + Daphne en écoute (pas de curl
+      # dans l'image slim, on teste le socket en Python).
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8000), 3).close()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-public"
+      - "traefik.http.routers.jangubi-api.rule=Host(`api-jangubi.kamalfils.app`)"
+      - "traefik.http.routers.jangubi-api.entrypoints=websecure"
+      - "traefik.http.routers.jangubi-api.tls=true"
+      - "traefik.http.routers.jangubi-api.tls.certresolver=letsencrypt"
+      - "traefik.http.services.jangubi-api.loadbalancer.server.port=8000"
+
+  # ===========================================================================
+  # Next.js (standalone) — frontend
+  # ===========================================================================
+  nextjs:
+    image: ${DOCKERHUB_USERNAME}/jangubi-frontend:${TAG:-latest}
+    container_name: jangubi_nextjs
+    restart: unless-stopped
+    command: node server.js
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      HOSTNAME: "0.0.0.0"
+    depends_on:
+      - django
+    networks:
+      - traefik-public
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-public"
+      - "traefik.http.routers.jangubi-web.rule=Host(`jangubi.kamalfils.app`)"
+      - "traefik.http.routers.jangubi-web.entrypoints=websecure"
+      - "traefik.http.routers.jangubi-web.tls=true"
+      - "traefik.http.routers.jangubi-web.tls.certresolver=letsencrypt"
+      - "traefik.http.services.jangubi-web.loadbalancer.server.port=3000"
+
+  # ===========================================================================
+  # Celery worker — NON exposé à Traefik. N'exécute pas les migrations
+  # (Django en est l'unique propriétaire) : on neutralise l'entrypoint.
+  # ===========================================================================
+  celery:
+    <<: *backend
+    container_name: jangubi_celery
+    entrypoint: []
+    command: celery -A apps.tasks worker -l info
+    depends_on:
+      django:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  # ===========================================================================
+  # Celery beat — planificateur. Le scheduler lit ses tâches en base
+  # (django_celery_beat), donc il démarre après que Django ait migré.
+  # ===========================================================================
+  beats:
+    <<: *backend
+    container_name: jangubi_beats
+    entrypoint: []
+    command: celery -A apps.tasks beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    depends_on:
+      django:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  # ===========================================================================
+  # PostgreSQL + pgvector — interne, pas de port mappé sur l'hôte
+  # ===========================================================================
+  db:
+    image: pgvector/pgvector:pg17
+    container_name: jangubi_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - jangubi-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===========================================================================
+  # Redis — cache Django + Channel Layers (WebSocket)
+  # ===========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: jangubi_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    networks:
+      - jangubi-internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===========================================================================
+  # RabbitMQ — broker Celery
+  # ===========================================================================
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: jangubi_rabbitmq
+    restart: unless-stopped
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - jangubi-internal
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+# ==============================================================================
+# Volumes nommés
+# ==============================================================================
+volumes:
+  postgres_data:
+  redis_data:
+  rabbitmq_data:
+
+# ==============================================================================
+# Réseaux
+#   traefik-public   : créé par core/docker-compose.yml -> external ici
+#   jangubi-internal : privé au stack (db/redis/rabbitmq + workers).
+#                      Bridge normal (pas internal:true) car celery/beats ont
+#                      besoin d'un accès sortant (Gemini, AELF, SMTP, S3).
+# ==============================================================================
+networks:
+  traefik-public:
+    external: true
+  jangubi-internal:
+    driver: bridge

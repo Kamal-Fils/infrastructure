@@ -1,0 +1,12 @@
+# Secrets — ne JAMAIS committer
+.env
+*.env
+!.env.example
+
+# Certificats / stockage ACME Traefik
+acme.json
+letsencrypt/
+
+# Divers
+*.log
+.DS_Store
