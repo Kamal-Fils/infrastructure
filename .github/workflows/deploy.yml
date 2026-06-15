@@ -26,13 +26,10 @@ concurrency:
 
 jobs:
 
-  # ═══════════════════════════════════════════════
-  # STAGING — develop + stage → automatique
-  # ═══════════════════════════════════════════════
   deploy-staging:
     runs-on: ubuntu-24.04
     if: |
-      github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'staging'
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'staging')
       || contains(fromJSON('["develop", "stage"]'), github.event.client_payload.ref)
 
     steps:
@@ -43,34 +40,31 @@ jobs:
           echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "📦 Staging → tag : $TAG"
 
-      - name: Deploy staging
+      - name: Configurer SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Ajouter le serveur aux known hosts
+        run: ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy sur le serveur staging
         env:
           TAG: ${{ steps.vars.outputs.tag }}
         run: |
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > /tmp/deploy_key
-          chmod 600 /tmp/deploy_key
-
-          ssh -i /tmp/deploy_key \
-              -o StrictHostKeyChecking=no \
-              ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} \
+          ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} \
               "set -e
                cd /opt/kamalfils/infrastructure
                git pull
                make jangubi-deploy TAG=$TAG
                make ps"
 
-          rm -f /tmp/deploy_key
-
-      - name: Résumé staging
+      - name: Résumé
         run: |
           echo "## 🟡 Staging déployé" >> $GITHUB_STEP_SUMMARY
           echo "- Tag : ${{ steps.vars.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
           echo "- URL : https://jangubi.kamalfils.app" >> $GITHUB_STEP_SUMMARY
 
-  # ═══════════════════════════════════════════════
-  # PRODUCTION — main + tags v* → automatique
-  # (désactivé jusqu'à ce que le serveur prod soit dispo)
-  # ═══════════════════════════════════════════════
   deploy-production:
     runs-on: ubuntu-24.04
     needs: deploy-staging
@@ -85,27 +79,27 @@ jobs:
         run: |
           TAG="${{ github.event.client_payload.tag || github.event.inputs.tag || 'latest' }}"
           echo "tag=$TAG" >> $GITHUB_OUTPUT
-          echo "🚀 Production → tag : $TAG"
 
-      - name: Deploy production
+      - name: Configurer SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.PROD_SSH_PRIVATE_KEY }}
+
+      - name: Ajouter le serveur prod aux known hosts
+        run: ssh-keyscan -H ${{ secrets.PROD_SSH_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy sur le serveur production
         env:
           TAG: ${{ steps.vars.outputs.tag }}
         run: |
-          echo "${{ secrets.PROD_SSH_PRIVATE_KEY }}" > /tmp/deploy_key
-          chmod 600 /tmp/deploy_key
-
-          ssh -i /tmp/deploy_key \
-              -o StrictHostKeyChecking=no \
-              ${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }} \
+          ssh ${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }} \
               "set -e
                cd /opt/kamalfils/infrastructure
                git pull
                make jangubi-deploy TAG=$TAG
                make ps"
 
-          rm -f /tmp/deploy_key
-
-      - name: Résumé production
+      - name: Résumé
         run: |
           echo "## 🟢 Production déployée" >> $GITHUB_STEP_SUMMARY
           echo "- Tag : ${{ steps.vars.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
