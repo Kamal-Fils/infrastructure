@@ -1,0 +1,26 @@
+{
+  "rabbit_version": "3.13.0",
+  "users": [
+    {
+      "name": "${RABBITMQ_DEFAULT_USER}",
+      "password": "${RABBITMQ_DEFAULT_PASS}",
+      "tags": "management"
+    }
+  ],
+  "vhosts": [
+    { "name": "/" }
+  ],
+  "permissions": [
+    {
+      "user": "${RABBITMQ_DEFAULT_USER}",
+      "vhost": "/",
+      "configure": ".*",
+      "write": ".*",
+      "read": ".*"
+    }
+  ],
+  "queues": [],
+  "exchanges": [],
+  "bindings": [],
+  "policies": []
+}

@@ -29,7 +29,7 @@ NEXT_SUN  := $$(python3 -c 'from datetime import datetime, timedelta; print((dat
 .DEFAULT_GOAL := help
 .PHONY: help \
         core-up core-down core-logs \
-        jangubi-up jangubi-down jangubi-logs jangubi-deploy \
+        jangubi-up jangubi-down jangubi-logs jangubi-deploy jangubi-rabbitmq-definitions \
         all-up all-down ps \
         jangubi-shell jangubi-dbshell jangubi-migrate jangubi-makemigrations \
         jangubi-check jangubi-collectstatic jangubi-createsuperuser \
@@ -62,7 +62,25 @@ core-logs: ## Logs des services partagés
 	$(COMPOSE_CORE) logs -f
 
 # ---- JANGUBI (django, nextjs, celery, beats, db, redis, rabbitmq) ----------
-jangubi-up: ## Démarre la stack JanguBi
+# Rend rabbitmq/definitions.json depuis le template + .env. Garantit le broker
+# user même sur un volume RabbitMQ existant (load_definitions). On n'extrait QUE
+# les 2 variables (pas de `. .env` qui casse sur les valeurs à caractères shell
+# spéciaux : le `(` de SECRET_KEY, le `$$` du hash Traefik…).
+jangubi-rabbitmq-definitions: ## Génère rabbitmq/definitions.json (broker user) depuis le template
+	@command -v envsubst >/dev/null 2>&1 || { echo "ERREUR : envsubst manquant → apt-get install -y gettext-base"; exit 1; }
+	@test -f $(ENV_FILE) || { echo "ERREUR : $(ENV_FILE) introuvable (cp .env.example .env)"; exit 1; }
+	@u=$$(grep -E '^RABBITMQ_DEFAULT_USER=' $(ENV_FILE) | head -1 | cut -d= -f2-); \
+	 p=$$(grep -E '^RABBITMQ_DEFAULT_PASS=' $(ENV_FILE) | head -1 | cut -d= -f2-); \
+	 [ -n "$$u" ] && [ -n "$$p" ] || { echo "ERREUR : RABBITMQ_DEFAULT_USER/PASS absents de $(ENV_FILE)"; exit 1; }; \
+	 RABBITMQ_DEFAULT_USER="$$u" RABBITMQ_DEFAULT_PASS="$$p" \
+	   envsubst '$$RABBITMQ_DEFAULT_USER $$RABBITMQ_DEFAULT_PASS' \
+	     < apps/jangubi/rabbitmq/definitions.tpl.json \
+	     > apps/jangubi/rabbitmq/definitions.json
+	@echo "✓ apps/jangubi/rabbitmq/definitions.json généré (broker user)"
+
+# Prérequis jangubi-rabbitmq-definitions : sans le fichier, Docker monte un
+# dossier vide à sa place → load_definitions échoue.
+jangubi-up: jangubi-rabbitmq-definitions ## Démarre la stack JanguBi
 	$(COMPOSE_JANGUBI) up -d
 
 jangubi-down: ## Arrête la stack JanguBi (conserve les volumes)
@@ -71,7 +89,7 @@ jangubi-down: ## Arrête la stack JanguBi (conserve les volumes)
 jangubi-logs: ## Logs de la stack JanguBi (django)
 	$(COMPOSE_JANGUBI) logs -f django
 
-jangubi-deploy: ## Déploie un tag précis : make jangubi-deploy TAG=sha-xxxxxxx
+jangubi-deploy: jangubi-rabbitmq-definitions ## Déploie un tag précis : make jangubi-deploy TAG=sha-xxxxxxx
 	@test -n "$(TAG)" || { echo "ERREUR : précisez TAG=... (ex: make jangubi-deploy TAG=sha-1a2b3c4)"; exit 1; }
 	TAG=$(TAG) $(COMPOSE_JANGUBI) pull
 	TAG=$(TAG) $(COMPOSE_JANGUBI) up -d
