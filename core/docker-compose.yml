@@ -23,6 +23,8 @@ services:
     image: traefik:v3.3
     container_name: traefik
     restart: unless-stopped
+    environment:
+      - DOCKER_API_VERSION=1.47
     command:
       # -- Dashboard / API interne (exposée derrière basic-auth, voir labels) --
       - "--api.dashboard=true"
