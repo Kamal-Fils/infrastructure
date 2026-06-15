@@ -1,0 +1,111 @@
+name: Deploy JanguBi
+
+on:
+  repository_dispatch:
+    types:
+      - deploy-backend
+      - deploy-frontend
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag (ex: develop-abc1234)"
+        required: false
+        default: "latest"
+      target:
+        description: "Cible"
+        required: false
+        default: "staging"
+        type: choice
+        options:
+          - staging
+          - production
+
+concurrency:
+  group: deploy-jangubi-${{ github.event.client_payload.ref || github.event.inputs.target }}
+  cancel-in-progress: false
+
+jobs:
+
+  # ═══════════════════════════════════════════════
+  # STAGING — develop + stage → automatique
+  # ═══════════════════════════════════════════════
+  deploy-staging:
+    runs-on: ubuntu-24.04
+    if: |
+      github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'staging'
+      || contains(fromJSON('["develop", "stage"]'), github.event.client_payload.ref)
+
+    steps:
+      - name: Résoudre le tag
+        id: vars
+        run: |
+          TAG="${{ github.event.client_payload.tag || github.event.inputs.tag || 'latest' }}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "📦 Staging → tag : $TAG"
+
+      - name: Deploy staging
+        env:
+          TAG: ${{ steps.vars.outputs.tag }}
+        run: |
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > /tmp/deploy_key
+          chmod 600 /tmp/deploy_key
+
+          ssh -i /tmp/deploy_key \
+              -o StrictHostKeyChecking=no \
+              ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} \
+              "set -e
+               cd /opt/kamalfils/infrastructure
+               git pull
+               make jangubi-deploy TAG=$TAG
+               make ps"
+
+          rm -f /tmp/deploy_key
+
+      - name: Résumé staging
+        run: |
+          echo "## 🟡 Staging déployé" >> $GITHUB_STEP_SUMMARY
+          echo "- Tag : ${{ steps.vars.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "- URL : https://jangubi.kamalfils.app" >> $GITHUB_STEP_SUMMARY
+
+  # ═══════════════════════════════════════════════
+  # PRODUCTION — main + tags v* → automatique
+  # (désactivé jusqu'à ce que le serveur prod soit dispo)
+  # ═══════════════════════════════════════════════
+  deploy-production:
+    runs-on: ubuntu-24.04
+    needs: deploy-staging
+    if: |
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'production')
+      || github.event.client_payload.ref == 'main'
+      || startsWith(github.event.client_payload.ref, 'v')
+
+    steps:
+      - name: Résoudre le tag
+        id: vars
+        run: |
+          TAG="${{ github.event.client_payload.tag || github.event.inputs.tag || 'latest' }}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "🚀 Production → tag : $TAG"
+
+      - name: Deploy production
+        env:
+          TAG: ${{ steps.vars.outputs.tag }}
+        run: |
+          echo "${{ secrets.PROD_SSH_PRIVATE_KEY }}" > /tmp/deploy_key
+          chmod 600 /tmp/deploy_key
+
+          ssh -i /tmp/deploy_key \
+              -o StrictHostKeyChecking=no \
+              ${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }} \
+              "set -e
+               cd /opt/kamalfils/infrastructure
+               git pull
+               make jangubi-deploy TAG=$TAG
+               make ps"
+
+          rm -f /tmp/deploy_key
+
+      - name: Résumé production
+        run: |
+          echo "## 🟢 Production déployée" >> $GITHUB_STEP_SUMMARY
+          echo "- Tag : ${{ steps.vars.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
