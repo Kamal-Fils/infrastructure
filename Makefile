@@ -4,14 +4,16 @@
 # Le .env partagé à la racine alimente l'interpolation des deux stacks.
 # ==============================================================================
 
-ENV_FILE  := .env
-CORE      := -f core/docker-compose.yml
-JANGUBI   := -f apps/jangubi/docker-compose.yml
-COMPOSE   := docker compose --env-file $(ENV_FILE)
+ENV_FILE   := .env
+CORE       := -f core/docker-compose.yml
+JANGUBI    := -f apps/jangubi/docker-compose.yml
+SENAFRIK1  := -f apps/senafrik1/docker-compose.yml
+COMPOSE    := docker compose --env-file $(ENV_FILE)
 
 # Projets nommés pour ne pas mélanger les stacks dans `docker compose ls`.
-CORE_P    := -p core
-JANGUBI_P := -p jangubi
+CORE_P      := -p core
+JANGUBI_P   := -p jangubi
+SENAFRIK1_P := -p senafrik1
 
 # Charge POSTGRES_USER, MINIO_*, AWS_* … comme variables Make (le '-' ignore
 # l'absence de .env). PAS de `export` : docker lit déjà --env-file, et le hash
@@ -19,8 +21,9 @@ JANGUBI_P := -p jangubi
 -include $(ENV_FILE)
 
 # Préfixes complets prêts à l'emploi.
-COMPOSE_CORE    := $(COMPOSE) $(CORE_P) $(CORE)
-COMPOSE_JANGUBI := $(COMPOSE) $(JANGUBI_P) $(JANGUBI)
+COMPOSE_CORE      := $(COMPOSE) $(CORE_P) $(CORE)
+COMPOSE_JANGUBI   := $(COMPOSE) $(JANGUBI_P) $(JANGUBI)
+COMPOSE_SENAFRIK1 := $(COMPOSE) $(SENAFRIK1_P) $(SENAFRIK1)
 
 # Calcule la fin de semaine liturgique (dimanche prochain) pour import_aelf.
 TODAY     := $$(date +%Y-%m-%d)
@@ -30,6 +33,7 @@ NEXT_SUN  := $$(python3 -c 'from datetime import datetime, timedelta; print((dat
 .PHONY: help \
         core-up core-down core-logs \
         jangubi-up jangubi-down jangubi-logs jangubi-deploy jangubi-rabbitmq-definitions \
+        senafrik1-up senafrik1-down senafrik1-logs senafrik1-deploy \
         all-up all-down ps \
         jangubi-shell jangubi-dbshell jangubi-migrate jangubi-makemigrations \
         jangubi-check jangubi-collectstatic jangubi-createsuperuser \
@@ -44,7 +48,7 @@ NEXT_SUN  := $$(python3 -c 'from datetime import datetime, timedelta; print((dat
         jangubi-setup-periodic-tasks
 
 help: ## Affiche cette aide
-	@grep -hE '^[a-zA-Z_-]+:.*?## .*$$' $(firstword $(MAKEFILE_LIST)) \
+	@grep -hE '^[a-zA-Z0-9_-]+:.*?## .*$$' $(firstword $(MAKEFILE_LIST)) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-30s\033[0m %s\n", $$1, $$2}'
 
 # ============================================================================
@@ -93,6 +97,22 @@ jangubi-deploy: jangubi-rabbitmq-definitions ## Déploie un tag précis : make j
 	@test -n "$(TAG)" || { echo "ERREUR : précisez TAG=... (ex: make jangubi-deploy TAG=sha-1a2b3c4)"; exit 1; }
 	TAG=$(TAG) $(COMPOSE_JANGUBI) pull
 	TAG=$(TAG) $(COMPOSE_JANGUBI) up -d
+
+# ---- SENAFRIK1 (backend, frontend, worker, db, redis, backup) --------------
+# Pas de prérequis type rabbitmq-definitions : broker Taskiq sur Redis.
+senafrik1-up: ## Démarre la stack Sen'Afrik1 (staging)
+	$(COMPOSE_SENAFRIK1) up -d
+
+senafrik1-down: ## Arrête la stack Sen'Afrik1 (conserve les volumes)
+	$(COMPOSE_SENAFRIK1) down
+
+senafrik1-logs: ## Logs de la stack Sen'Afrik1 (backend)
+	$(COMPOSE_SENAFRIK1) logs -f backend
+
+senafrik1-deploy: ## Déploie un tag précis : make senafrik1-deploy TAG=sha-xxxxxxx
+	@test -n "$(TAG)" || { echo "ERREUR : précisez TAG=... (ex: make senafrik1-deploy TAG=sha-1a2b3c4)"; exit 1; }
+	TAG=$(TAG) $(COMPOSE_SENAFRIK1) pull
+	TAG=$(TAG) $(COMPOSE_SENAFRIK1) up -d
 
 # ---- Global ----------------------------------------------------------------
 all-up: core-up jangubi-up ## Démarre core puis JanguBi (dans l'ordre)

@@ -11,6 +11,11 @@ apps/jangubi/rabbitmq/definitions.json
 acme.json
 letsencrypt/
 
+# Dumps de sauvegarde Postgres Sen'Afrik1 (générés par le service `backup`).
+# On garde le dossier (.gitkeep) mais jamais les dumps (données + volumineux).
+apps/senafrik1/backups/*
+!apps/senafrik1/backups/.gitkeep
+
 # Divers
 *.log
 .DS_Store

@@ -1,0 +1,234 @@
+# ==============================================================================
+# APP — Sen'Afrik1 Conciergerie (staging) sur kamalfils.app
+#
+#   backend  -> api-senafrik1.kamalfils.app   (FastAPI / Uvicorn, port 8000)
+#   frontend -> senafrik1.kamalfils.app        (Next.js standalone, port 3000)
+#   worker   -> Taskiq (emails OTP/invitations async)        — non exposé
+#   db       -> PostgreSQL 17                  (interne, jamais exposé)
+#   redis    -> cache + sessions + rate-limit + broker Taskiq (interne)
+#   backup   -> dump pg_dump périodique du Postgres          — non exposé
+#
+# /!\ PAS de RabbitMQ : le broker Taskiq tourne sur Redis (TASKIQ_BROKER_TYPE=redis).
+#     Donc PAS de service `beats` non plus (ordonnancement géré côté app si besoin).
+#
+# Les images viennent de DockerHub, construites par la CI :
+#   ${DOCKERHUB_USERNAME}/senafrik1-backend:${TAG}
+#   ${DOCKERHUB_USERNAME}/senafrik1-frontend:${TAG}
+#
+# Réseaux :
+#   traefik-public      EXTERNAL — créé par core/, sert l'ingress (backend, frontend)
+#   senafrik1-internal  privé au stack — db/redis/worker/backend/backup
+#
+# DNS (À FAIRE AVANT le 1er `up`, sinon le challenge HTTP Let's Encrypt échoue) :
+#   créer les enregistrements A
+#     api-senafrik1.kamalfils.app  -> 164.92.238.231
+#     senafrik1.kamalfils.app      -> 164.92.238.231
+#
+# Déploiement :  make senafrik1-deploy TAG=sha-xxxxxxx   (depuis infrastructure/)
+# ==============================================================================
+
+# Base commune aux services qui partagent l'image backend (backend + worker).
+x-backend: &backend
+  image: ${DOCKERHUB_USERNAME}/senafrik1-backend:${TAG:-latest}
+  restart: unless-stopped
+  env_file:
+    # Fichier unique à la racine d'infrastructure/ (relatif à CE compose).
+    - ../../.env
+  networks:
+    - senafrik1-internal
+
+services:
+  # ===========================================================================
+  # Backend FastAPI — seul service backend exposé à Traefik.
+  # L'entrypoint (docker-entrypoint.sh dans l'image) applique les migrations
+  # Alembic PUIS lance `fastapi run`. C'est l'UNIQUE propriétaire des migrations.
+  # ===========================================================================
+  backend:
+    <<: *backend
+    container_name: senafrik1_backend
+    # L'image expose déjà ENTRYPOINT=/docker-entrypoint.sh ; on l'explicite
+    # pour rester lisible et symétrique avec la neutralisation côté worker.
+    entrypoint: ["/docker-entrypoint.sh"]
+    command: ["fastapi", "run", "interfaces/main.py", "--host", "0.0.0.0", "--port", "8000"]
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - senafrik1-internal
+      - traefik-public
+    healthcheck:
+      # Port ouvert => migrations terminées + serveur en écoute (pas de curl
+      # dans l'image slim, on teste le socket en Python).
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8000), 3).close()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-public"
+      - "traefik.http.routers.senafrik1-api.rule=Host(`api-senafrik1.kamalfils.app`)"
+      - "traefik.http.routers.senafrik1-api.entrypoints=websecure"
+      - "traefik.http.routers.senafrik1-api.tls=true"
+      - "traefik.http.routers.senafrik1-api.tls.certresolver=letsencrypt"
+      - "traefik.http.services.senafrik1-api.loadbalancer.server.port=8000"
+
+  # ===========================================================================
+  # Frontend Next.js (standalone) — `node server.js`, port 3000.
+  # ===========================================================================
+  frontend:
+    image: ${DOCKERHUB_USERNAME}/senafrik1-frontend:${TAG:-latest}
+    container_name: senafrik1_frontend
+    restart: unless-stopped
+    command: node server.js
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      HOSTNAME: "0.0.0.0"
+    depends_on:
+      - backend
+    networks:
+      - traefik-public
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-public"
+      - "traefik.http.routers.senafrik1-web.rule=Host(`senafrik1.kamalfils.app`)"
+      - "traefik.http.routers.senafrik1-web.entrypoints=websecure"
+      - "traefik.http.routers.senafrik1-web.tls=true"
+      - "traefik.http.routers.senafrik1-web.tls.certresolver=letsencrypt"
+      - "traefik.http.services.senafrik1-web.loadbalancer.server.port=3000"
+
+  # ===========================================================================
+  # Worker Taskiq — NON exposé à Traefik. N'exécute PAS les migrations
+  # (le backend en est l'unique propriétaire) : on neutralise l'entrypoint,
+  # exactement comme `celery` chez jangubi.
+  # Broker = Redis (db 3). WORKDIR de l'image prod = /app/src, donc le chemin
+  # d'import `infrastructure.taskiq.worker:default_broker` est résolvable.
+  # ===========================================================================
+  worker:
+    <<: *backend
+    container_name: senafrik1_worker
+    entrypoint: []
+    command: ["taskiq", "worker", "infrastructure.taskiq.worker:default_broker"]
+    depends_on:
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ===========================================================================
+  # PostgreSQL 17 — interne, AUCUN port mappé sur l'hôte.
+  # ===========================================================================
+  db:
+    image: postgres:17-alpine
+    container_name: senafrik1_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - senafrik1_postgres_data:/var/lib/postgresql/data
+    networks:
+      - senafrik1-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===========================================================================
+  # Redis — cache (db0) + rate-limit (db1) + sessions + broker Taskiq (db3).
+  # `appendonly yes` pour persister entre redémarrages.
+  # ===========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: senafrik1_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - senafrik1_redis_data:/data
+    networks:
+      - senafrik1-internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===========================================================================
+  # Backup Postgres — dump périodique vers le volume `senafrik1_backups`
+  # (monté aussi en bind sur ./backups pour récupération manuelle).
+  #
+  # Stratégie : conteneur léger (même image postgres → même `pg_dump`) qui
+  # boucle : dump compressé toutes les BACKUP_INTERVAL_SECONDS, rétention des
+  # BACKUP_KEEP derniers fichiers. Simple, sans cron système, suffisant en
+  # STAGING. Pour de la prod, brancher plutôt un cron hôte + envoi S3/MinIO.
+  #
+  # Restauration :
+  #   gunzip -c apps/senafrik1/backups/senafrik1-<date>.sql.gz \
+  #     | docker compose -p senafrik1 -f apps/senafrik1/docker-compose.yml \
+  #         exec -T db psql -U $POSTGRES_USER -d $POSTGRES_DB
+  # ===========================================================================
+  backup:
+    image: postgres:17-alpine
+    container_name: senafrik1_backup
+    restart: unless-stopped
+    env_file:
+      - ../../.env
+    environment:
+      # Intervalle entre deux dumps (défaut 24h) et nombre de dumps conservés.
+      BACKUP_INTERVAL_SECONDS: "${BACKUP_INTERVAL_SECONDS:-86400}"
+      BACKUP_KEEP: "${BACKUP_KEEP:-7}"
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - senafrik1_backups:/backups
+      # Bind local pour inspecter/récupérer les dumps depuis le repo infra.
+      - ./backups:/backups-local
+    networks:
+      - senafrik1-internal
+    depends_on:
+      db:
+        condition: service_healthy
+    # Boucle de sauvegarde : dump compressé horodaté + purge de l'ancien.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        echo "[backup] démarrage — intervalle=$${BACKUP_INTERVAL_SECONDS}s, rétention=$${BACKUP_KEEP}";
+        while true; do
+          ts=$$(date +%Y%m%d-%H%M%S);
+          out="/backups/senafrik1-$${ts}.sql.gz";
+          echo "[backup] dump -> $${out}";
+          if pg_dump -h db -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}" | gzip > "$${out}"; then
+            cp "$${out}" /backups-local/ 2>/dev/null || true;
+            echo "[backup] OK";
+          else
+            echo "[backup] ECHEC du dump"; rm -f "$${out}";
+          fi;
+          ls -1t /backups/senafrik1-*.sql.gz 2>/dev/null | tail -n +$$(( $${BACKUP_KEEP} + 1 )) | xargs -r rm -f;
+          sleep "$${BACKUP_INTERVAL_SECONDS}";
+        done
+
+# ==============================================================================
+# Volumes nommés
+# ==============================================================================
+volumes:
+  senafrik1_postgres_data:
+  senafrik1_redis_data:
+  senafrik1_backups:
+
+# ==============================================================================
+# Réseaux
+#   traefik-public      : créé par core/docker-compose.yml -> external ici.
+#   senafrik1-internal  : privé au stack (db/redis/worker/backend/backup).
+#                         Bridge normal (pas internal:true) car worker/backend
+#                         ont besoin d'un accès sortant (SMTP Resend, Sentry…).
+# ==============================================================================
+networks:
+  traefik-public:
+    external: true
+  senafrik1-internal:
+    driver: bridge
