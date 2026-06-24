@@ -37,6 +37,7 @@ NEXT_SUN  := $$(python3 -c 'from datetime import datetime, timedelta; print((dat
         core-up core-down core-logs \
         jangubi-up jangubi-down jangubi-logs jangubi-deploy jangubi-rabbitmq-definitions \
         senafrik1-up senafrik1-down senafrik1-logs senafrik1-deploy \
+        senafrik1-shell senafrik1-dbshell senafrik1-migrate senafrik1-create-admin \
         all-up all-down ps \
         jangubi-shell jangubi-dbshell jangubi-migrate jangubi-makemigrations \
         jangubi-check jangubi-collectstatic jangubi-createsuperuser \
@@ -116,6 +117,26 @@ senafrik1-deploy: ## Déploie un tag précis : make senafrik1-deploy TAG=sha-xxx
 	@test -n "$(TAG)" || { echo "ERREUR : précisez TAG=... (ex: make senafrik1-deploy TAG=sha-1a2b3c4)"; exit 1; }
 	TAG=$(TAG) $(COMPOSE_SENAFRIK1) pull
 	TAG=$(TAG) $(COMPOSE_SENAFRIK1) up -d
+
+# ============================================================================
+# SENAFRIK1 — exploitation FastAPI (exécuté DANS le conteneur de prod `backend`)
+# Le conteneur prod a WORKDIR /app/src ; on lance depuis /app (-w /app) pour que
+# le package `src` (et `python -m src.scripts.*`) se résolve. alembic.ini est à /app.
+# ============================================================================
+senafrik1-shell: ## REPL Python dans le conteneur backend (depuis /app)
+	$(COMPOSE_SENAFRIK1) exec -w /app backend python
+
+senafrik1-dbshell: ## Shell PostgreSQL (psql) du stack Sen'Afrik1
+	$(COMPOSE_SENAFRIK1) exec db sh -c 'psql -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"'
+
+senafrik1-migrate: ## Applique les migrations Alembic (normalement faites au boot)
+	$(COMPOSE_SENAFRIK1) exec -w /app backend alembic upgrade head
+
+# Crée OU promeut (idempotent) le compte Gérant dans la table User.
+# Lit ADMIN_NAME/ADMIN_EMAIL/ADMIN_USERNAME/ADMIN_PASSWORD du .env.senafrik1
+# (déjà injectés dans l'environnement du conteneur via env_file).
+senafrik1-create-admin: ## Initialise l'utilisateur admin (lit ADMIN_* du .env.senafrik1)
+	$(COMPOSE_SENAFRIK1) exec -w /app backend python -m src.scripts.create_admin
 
 # ---- Global ----------------------------------------------------------------
 all-up: core-up jangubi-up ## Démarre core puis JanguBi (dans l'ordre)
