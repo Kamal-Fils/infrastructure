@@ -37,8 +37,12 @@ jobs:
     steps:
       - name: Résoudre le tag
         id: vars
+        # Staging déploie back+front ENSEMBLE : on prend le TAG DE BRANCHE
+        # (client_payload.ref = develop/stage), poussé par les 2 CI, et PAS le
+        # sha-<7> (différent entre api et ui → l'image de l'autre service n'existe
+        # pas à ce sha, le `compose pull` échouerait).
         run: |
-          TAG="${{ github.event.client_payload.tag || github.event.inputs.tag || 'latest' }}"
+          TAG="${{ github.event.client_payload.ref || github.event.inputs.tag || 'develop' }}"
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
       - name: Setup SSH
@@ -84,8 +88,10 @@ jobs:
     steps:
       - name: Résoudre le tag
         id: vars
+        # Prod : tag de branche aussi (client_payload.ref = main → image :main des
+        # 2 CI), cohérent back+front. Override manuel via workflow_dispatch.inputs.tag.
         run: |
-          TAG="${{ github.event.client_payload.tag || github.event.inputs.tag || 'latest' }}"
+          TAG="${{ github.event.client_payload.ref || github.event.inputs.tag || 'latest' }}"
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
       - name: Configurer SSH
