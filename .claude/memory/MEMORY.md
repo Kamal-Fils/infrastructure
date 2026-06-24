@@ -1,0 +1,1 @@
+- [Sen'Afrik1 phases progress](senafrik-phases-progress.md) — what's built vs remaining across the 3 repos (infra: apps/senafrik1, CI deploy, ops actions)
