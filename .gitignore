@@ -2,6 +2,9 @@
 .env
 *.env
 !.env.example
+# Sen'Afrik1 a son propre fichier d'env ; ignorer le réel, garder l'exemple.
+.env.senafrik1
+!.env.senafrik1.example
 
 # RabbitMQ : definitions.json rendu contient le mot de passe broker EN CLAIR.
 # Seul le template (definitions.tpl.json) est committé.

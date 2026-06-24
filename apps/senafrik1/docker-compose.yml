@@ -32,8 +32,9 @@ x-backend: &backend
   image: ${DOCKERHUB_USERNAME}/senafrik1-backend:${TAG:-latest}
   restart: unless-stopped
   env_file:
-    # Fichier unique à la racine d'infrastructure/ (relatif à CE compose).
-    - ../../.env
+    # Fichier DÉDIÉ à Sen'Afrik1 (≠ .env racine de JanguBi) — identifiants/DB/secret
+    # PROPRES. Le Makefile passe aussi `--env-file .env.senafrik1` pour l'interpolation.
+    - ../../.env.senafrik1
   networks:
     - senafrik1-internal
 
@@ -177,7 +178,7 @@ services:
     container_name: senafrik1_backup
     restart: unless-stopped
     env_file:
-      - ../../.env
+      - ../../.env.senafrik1
     environment:
       # Intervalle entre deux dumps (défaut 24h) et nombre de dumps conservés.
       BACKUP_INTERVAL_SECONDS: "${BACKUP_INTERVAL_SECONDS:-86400}"

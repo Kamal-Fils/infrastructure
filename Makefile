@@ -5,6 +5,8 @@
 # ==============================================================================
 
 ENV_FILE   := .env
+# Sen'Afrik1 a son PROPRE fichier d'env (identifiants/DB/secret DISTINCTS de JanguBi).
+ENV_FILE_SENAFRIK1 := .env.senafrik1
 CORE       := -f core/docker-compose.yml
 JANGUBI    := -f apps/jangubi/docker-compose.yml
 SENAFRIK1  := -f apps/senafrik1/docker-compose.yml
@@ -23,7 +25,8 @@ SENAFRIK1_P := -p senafrik1
 # Préfixes complets prêts à l'emploi.
 COMPOSE_CORE      := $(COMPOSE) $(CORE_P) $(CORE)
 COMPOSE_JANGUBI   := $(COMPOSE) $(JANGUBI_P) $(JANGUBI)
-COMPOSE_SENAFRIK1 := $(COMPOSE) $(SENAFRIK1_P) $(SENAFRIK1)
+# Sen'Afrik1 : interpolation + env_file depuis SON fichier dédié (≠ JanguBi).
+COMPOSE_SENAFRIK1 := docker compose --env-file $(ENV_FILE_SENAFRIK1) $(SENAFRIK1_P) $(SENAFRIK1)
 
 # Calcule la fin de semaine liturgique (dimanche prochain) pour import_aelf.
 TODAY     := $$(date +%Y-%m-%d)
