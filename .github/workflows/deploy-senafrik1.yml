@@ -1,0 +1,113 @@
+name: Deploy Sen'Afrik1
+
+# Déclenché par repository_dispatch envoyé par les repos api (Sen-Afrik1/api) et
+# ui (Sen-Afrik1/ui) après build & push de l'image sur DockerHub. Mirroir de
+# deploy.yml (JanguBi) mais ciblant la stack apps/senafrik1 (make senafrik1-deploy).
+on:
+  repository_dispatch:
+    types:
+      - deploy-senafrik1-backend
+      - deploy-senafrik1-frontend
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag (ex: sha-abc1234)"
+        required: false
+        default: "latest"
+      target:
+        description: "Cible"
+        required: false
+        default: "staging"
+        type: choice
+        options:
+          - staging
+          - production
+
+concurrency:
+  group: deploy-senafrik1-${{ github.event.client_payload.ref || github.event.inputs.target }}
+  cancel-in-progress: false
+
+jobs:
+  deploy-staging:
+    runs-on: ubuntu-24.04
+    if: |
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'staging')
+      || contains(fromJSON('["develop", "stage"]'), github.event.client_payload.ref)
+
+    steps:
+      - name: Résoudre le tag
+        id: vars
+        run: |
+          TAG="${{ github.event.client_payload.tag || github.event.inputs.tag || 'latest' }}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Setup SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.SSH_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Deploy staging
+        env:
+          TAG: ${{ steps.vars.outputs.tag }}
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+              ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} \
+              "set -e
+               cd /opt/kamalfils/infrastructure
+               git pull
+               make senafrik1-deploy TAG=$TAG
+               make ps"
+
+      - name: Résumé
+        run: |
+          echo "## 🟡 Sen'Afrik1 staging déployé" >> $GITHUB_STEP_SUMMARY
+          echo "- Tag : ${{ steps.vars.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "- App : https://senafrik1.kamalfils.app" >> $GITHUB_STEP_SUMMARY
+          echo "- API : https://api-senafrik1.kamalfils.app" >> $GITHUB_STEP_SUMMARY
+
+  deploy-production:
+    runs-on: ubuntu-24.04
+    # Environnement protégé : exige une approbation manuelle (à configurer dans
+    # Settings -> Environments -> production). La prod n'existe pas encore : la
+    # structure est prête, l'activation se fera quand le DNS/serveur prod seront là.
+    environment: production
+    if: |
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'production')
+      || github.event.client_payload.ref == 'main'
+      || startsWith(github.event.client_payload.ref, 'v')
+
+    steps:
+      - name: Résoudre le tag
+        id: vars
+        run: |
+          TAG="${{ github.event.client_payload.tag || github.event.inputs.tag || 'latest' }}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Configurer SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.PROD_SSH_PRIVATE_KEY }}
+
+      - name: Ajouter le serveur prod aux known hosts
+        run: ssh-keyscan -H ${{ secrets.PROD_SSH_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy production
+        env:
+          TAG: ${{ steps.vars.outputs.tag }}
+        run: |
+          ssh ${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }} \
+              "set -e
+               cd /opt/kamalfils/infrastructure
+               git pull
+               make senafrik1-deploy TAG=$TAG
+               make ps"
+
+      - name: Résumé
+        run: |
+          echo "## 🟢 Sen'Afrik1 production déployée" >> $GITHUB_STEP_SUMMARY
+          echo "- Tag : ${{ steps.vars.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
