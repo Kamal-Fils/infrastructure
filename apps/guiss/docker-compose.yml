@@ -257,8 +257,12 @@ services:
         condition: service_healthy
     networks:
       - guiss-internal
-    # Aucun label Traefik — service strictement interne (PHI / données patients)
-    # Aucun port publié sur l'hôte
+    # Aucun label Traefik — service strictement interne (PHI / données patients).
+    # Port lié au localhost du SERVEUR uniquement (jamais 0.0.0.0) : permet
+    # d'atteindre l'UI de test HAPI via tunnel SSH stable, sans exposition :
+    #   ssh -L 8085:127.0.0.1:8085 sosza@<serveur>   →  http://localhost:8085/
+    ports:
+      - "127.0.0.1:8085:8080"
 
   # ===========================================================================
   # Backup Postgres — dump périodique vers le volume `guiss_backups`
