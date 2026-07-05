@@ -46,7 +46,7 @@ NEXT_SUN  := $$(python3 -c 'from datetime import datetime, timedelta; print((dat
         senafrik1-shell senafrik1-dbshell senafrik1-migrate senafrik1-create-admin \
         guiss-up guiss-down guiss-logs guiss-deploy \
         guiss-shell guiss-dbshell guiss-migrate guiss-collectstatic \
-        guiss-create-superuser guiss-create-data-entry-user \
+        guiss-create-superuser \
         guiss-setup-periodic-tasks guiss-init-minio \
         guiss-celery-logs guiss-celery-restart \
         all-up all-down ps \
@@ -181,11 +181,15 @@ guiss-migrate: ## Applique les migrations Django (normalement faites au boot)
 guiss-collectstatic: ## Collecte les fichiers statiques
 	$(COMPOSE_GUISS) exec django python manage.py collectstatic --noinput
 
-guiss-create-superuser: ## Crée le super-utilisateur de test (non interactif)
-	$(COMPOSE_GUISS) exec django python manage.py create_test_superuser
-
-guiss-create-data-entry-user: ## Crée un utilisateur saisie de données
-	$(COMPOSE_GUISS) exec django python manage.py create_data_entry_user
+# USERNAME_FIELD=email, REQUIRED_FIELDS=[] → createsuperuser standard suffit.
+# (create_test_superuser n'existe pas dans l'image — cible corrigée.)
+guiss-create-superuser: ## Crée le superuser (lit ADMIN_EMAIL/ADMIN_PASSWORD du .env.guiss)
+	@EMAIL=$$(grep -E '^ADMIN_EMAIL=' $(ENV_FILE_GUISS) | head -1 | cut -d= -f2-); \
+	 PASS=$$(grep -E '^ADMIN_PASSWORD=' $(ENV_FILE_GUISS) | head -1 | cut -d= -f2-); \
+	 [ -n "$$EMAIL" ] && [ -n "$$PASS" ] || { echo "ERREUR : ADMIN_EMAIL/ADMIN_PASSWORD absents de $(ENV_FILE_GUISS)"; exit 1; }; \
+	 $(COMPOSE_GUISS) exec -e DJANGO_SUPERUSER_PASSWORD="$$PASS" django \
+	   python manage.py createsuperuser --noinput --email "$$EMAIL" \
+	   || echo "(superuser déjà existant ?)"
 
 guiss-setup-periodic-tasks: ## Enregistre les tâches Celery Beat en base (DatabaseScheduler)
 	$(COMPOSE_GUISS) exec django python manage.py setup_periodic_tasks

@@ -104,6 +104,10 @@ services:
       NODE_ENV: production
       PORT: "3000"
       HOSTNAME: "0.0.0.0"
+      # NextAuth : secrets de RUNTIME (server-only) — jamais bakés au build.
+      # Sans eux, next-auth répond 307 /api/auth/error?error=Configuration.
+      NEXTAUTH_URL: ${NEXTAUTH_URL}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
     depends_on:
       - django
     networks:
@@ -132,6 +136,14 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # Le HEALTHCHECK de l'image teste le socket 8000 (Daphne) — faux négatif
+    # permanent pour un worker. On le remplace par un vrai ping Celery.
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A apps.tasks inspect ping --timeout 10 | grep -q pong"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 60s
 
   # ===========================================================================
   # Celery beat — planificateur. Le scheduler lit ses tâches en base
@@ -147,6 +159,10 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # beat n'expose ni socket ni ping — on désactive le HEALTHCHECK hérité
+    # de l'image (socket 8000) qui le marquait unhealthy à tort.
+    healthcheck:
+      disable: true
 
   # ===========================================================================
   # PostgreSQL — base principale Django. Interne, pas de port mappé sur l'hôte.
