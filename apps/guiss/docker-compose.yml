@@ -1,0 +1,309 @@
+# ==============================================================================
+# APP — Guiss-Talli Dépistage (staging) sur kamalfils.app
+#
+#   django    -> api-guiss.kamalfils.app   (Daphne / ASGI, port 8000)
+#   nextjs    -> guiss.kamalfils.app       (Next.js standalone, port 3000)
+#   celery    worker asynchrone (apps.tasks)                    — non exposé
+#   beats     planificateur (django-celery-beat, scheduler en base) — non exposé
+#   db        PostgreSQL 17               (interne, jamais exposé)
+#   redis     cache + broker Celery       (interne)
+#   hapi-db   PostgreSQL 17 dédié HAPI    (interne, jamais exposé — PHI)
+#   hapi      HAPI FHIR R4 server         (interne, jamais exposé — PHI)
+#   backup    dump pg_dump périodique du Postgres               — non exposé
+#
+# /!\ RAM : HAPI (JVM) est bridé à 384 Mo de heap + mem_limit — ce serveur est
+#     mutualisé avec JanguBi et Sen'Afrik1. Si OOM, upgrader le droplet.
+#
+# Les images viennent de DockerHub, construites par la CI des apps :
+#   ${DOCKERHUB_USERNAME}/guiss-backend:${TAG}
+#   ${DOCKERHUB_USERNAME}/guiss-frontend:${TAG}
+#
+# Tag de déploiement = nom de branche (develop / stage) — jamais un sha par
+# commit car backend et frontend ont des SHAs distincts.
+#
+# Réseaux :
+#   traefik-public  EXTERNAL — créé par core/, sert l'ingress (django, nextjs)
+#   guiss-internal  privé au stack — db/redis/hapi/celery/beats
+#                   Bridge NORMAL (pas internal:true) : celery/beats ont besoin
+#                   d'un accès sortant (SMTP, S3, Gemini, APIs externes).
+#
+# DNS (À FAIRE AVANT le 1er `up`, sinon le challenge HTTP Let's Encrypt échoue) :
+#   créer les enregistrements A
+#     api-guiss.kamalfils.app  -> 164.92.238.231
+#     guiss.kamalfils.app      -> 164.92.238.231
+#
+# Déploiement :  make guiss-deploy TAG=develop   (depuis infrastructure/)
+# ==============================================================================
+
+# Base commune aux 3 services qui partagent l'image backend.
+x-backend: &backend
+  image: ${DOCKERHUB_USERNAME}/guiss-backend:${TAG:-develop}
+  restart: unless-stopped
+  env_file:
+    # Fichier DÉDIÉ à Guiss (≠ .env racine de JanguBi, ≠ .env.senafrik1) —
+    # identifiants/DB/secret PROPRES. Le Makefile passe aussi
+    # `--env-file .env.guiss` pour l'interpolation.
+    - ../../.env.guiss
+  networks:
+    - guiss-internal
+
+services:
+  # ===========================================================================
+  # Django (ASGI / Daphne) — seul service backend exposé à Traefik.
+  # L'ENTRYPOINT de l'image exécute les migrations puis démarre Daphne.
+  # On ne surcharge PAS l'entrypoint ici (contrairement à celery/beats).
+  # ===========================================================================
+  django:
+    <<: *backend
+    container_name: guiss_django
+    command: daphne -b 0.0.0.0 -p 8000 backend.asgi:application
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - guiss-internal
+      - traefik-public
+    healthcheck:
+      # Teste le socket TCP — pas de curl dans l'image slim.
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8000), 3).close()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-public"
+      # --- Routeur HTTPS -> api-guiss.kamalfils.app ---
+      - "traefik.http.routers.guiss-api.rule=Host(`api-guiss.kamalfils.app`)"
+      - "traefik.http.routers.guiss-api.entrypoints=websecure"
+      - "traefik.http.routers.guiss-api.tls=true"
+      - "traefik.http.routers.guiss-api.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.guiss-api.service=guiss-api-svc"
+      - "traefik.http.routers.guiss-api.middlewares=guiss-cors"
+      # --- Service (port Daphne) ---
+      - "traefik.http.services.guiss-api-svc.loadbalancer.server.port=8000"
+      # --- Middleware CORS (autorise le frontend Next.js staging) ---
+      - "traefik.http.middlewares.guiss-cors.headers.accesscontrolallowmethods=GET,POST,PUT,PATCH,DELETE,OPTIONS"
+      - "traefik.http.middlewares.guiss-cors.headers.accesscontrolallowheaders=Authorization,Content-Type,X-Requested-With,Cookie,Set-Cookie"
+      - "traefik.http.middlewares.guiss-cors.headers.accesscontrolalloworiginlist=https://guiss.kamalfils.app"
+      - "traefik.http.middlewares.guiss-cors.headers.accesscontrolallowcredentials=true"
+
+  # ===========================================================================
+  # Next.js (standalone) — frontend.
+  # /!\ L'image doit avoir été buildée avec NEXT_PUBLIC_API_URL =
+  #     https://api-guiss.kamalfils.app (env GitHub `staging` de GuissUI).
+  # ===========================================================================
+  nextjs:
+    image: ${DOCKERHUB_USERNAME}/guiss-frontend:${TAG:-develop}
+    container_name: guiss_nextjs
+    restart: unless-stopped
+    command: node server.js
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      HOSTNAME: "0.0.0.0"
+    depends_on:
+      - django
+    networks:
+      - traefik-public
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-public"
+      - "traefik.http.routers.guiss-web.rule=Host(`guiss.kamalfils.app`)"
+      - "traefik.http.routers.guiss-web.entrypoints=websecure"
+      - "traefik.http.routers.guiss-web.tls=true"
+      - "traefik.http.routers.guiss-web.tls.certresolver=letsencrypt"
+      - "traefik.http.services.guiss-web.loadbalancer.server.port=3000"
+
+  # ===========================================================================
+  # Celery worker — NON exposé à Traefik. N'exécute pas les migrations
+  # (Django en est l'unique propriétaire) : on neutralise l'entrypoint.
+  # Concurrency 2 (staging mutualisé) au lieu de 4 en prod.
+  # ===========================================================================
+  celery:
+    <<: *backend
+    container_name: guiss_celery
+    entrypoint: []
+    command: celery -A apps.tasks worker -l INFO -c 2
+    depends_on:
+      django:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ===========================================================================
+  # Celery beat — planificateur. Le scheduler lit ses tâches en base
+  # (django_celery_beat), donc il démarre après que Django ait migré.
+  # ===========================================================================
+  beats:
+    <<: *backend
+    container_name: guiss_beats
+    entrypoint: []
+    command: celery -A apps.tasks beat -l INFO --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    depends_on:
+      django:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ===========================================================================
+  # PostgreSQL — base principale Django. Interne, pas de port mappé sur l'hôte.
+  # ===========================================================================
+  db:
+    image: postgres:17-alpine
+    container_name: guiss_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Scripts d'initialisation (extensions uuid-ossp, pg_trgm, unaccent)
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - guiss-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===========================================================================
+  # Redis — cache Django + broker Celery (DB 0 = cache, DB 1 = Celery).
+  # Protégé par mot de passe (REDIS_PASSWORD).
+  # ===========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: guiss_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+    networks:
+      - guiss-internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===========================================================================
+  # HAPI-DB — PostgreSQL dédié au serveur FHIR.
+  # INTERNE UNIQUEMENT — PHI (données de santé). Jamais exposé à Traefik.
+  # ===========================================================================
+  hapi-db:
+    image: postgres:17-alpine
+    container_name: guiss_hapi_db
+    restart: unless-stopped
+    mem_limit: 256m
+    environment:
+      POSTGRES_DB: ${HAPI_DB_NAME:-hapi}
+      POSTGRES_USER: ${HAPI_DB_USER:-hapi}
+      POSTGRES_PASSWORD: ${HAPI_DB_PASSWORD}
+    volumes:
+      - hapi_pg_data:/var/lib/postgresql/data
+    networks:
+      - guiss-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${HAPI_DB_USER:-hapi} -d ${HAPI_DB_NAME:-hapi}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===========================================================================
+  # HAPI FHIR R4 — serveur FHIR interne.
+  # INTERNE UNIQUEMENT — PHI. Pas de labels Traefik. Pas de port hôte publié.
+  # Django y accède via http://hapi:8080/fhir (réseau guiss-internal).
+  # JVM bridée (serveur staging mutualisé) : heap 384 Mo max, mem_limit 768 Mo.
+  # ===========================================================================
+  hapi:
+    image: hapiproject/hapi:v7.4.0
+    container_name: guiss_hapi
+    restart: unless-stopped
+    mem_limit: 768m
+    environment:
+      JAVA_TOOL_OPTIONS: "-Xms128m -Xmx384m"
+      SPRING_DATASOURCE_URL: "jdbc:postgresql://hapi-db:5432/${HAPI_DB_NAME:-hapi}"
+      SPRING_DATASOURCE_USERNAME: "${HAPI_DB_USER:-hapi}"
+      SPRING_DATASOURCE_PASSWORD: "${HAPI_DB_PASSWORD}"
+      SPRING_DATASOURCE_DRIVERCLASSNAME: "org.postgresql.Driver"
+      SPRING_JPA_PROPERTIES_HIBERNATE_DIALECT: "ca.uhn.fhir.jpa.model.dialect.HapiFhirPostgresDialect"
+      SPRING_JPA_HIBERNATE_DDL_AUTO: "update"
+      HAPI_FHIR_VERSION: "R4"
+    depends_on:
+      hapi-db:
+        condition: service_healthy
+    networks:
+      - guiss-internal
+    # Aucun label Traefik — service strictement interne (PHI / données patients)
+    # Aucun port publié sur l'hôte
+
+  # ===========================================================================
+  # Backup Postgres — dump périodique vers le volume `guiss_backups`
+  # (monté aussi en bind sur ./backups pour récupération manuelle).
+  # Même stratégie que Sen'Afrik1 : boucle pg_dump compressé + rétention.
+  # ===========================================================================
+  backup:
+    image: postgres:17-alpine
+    container_name: guiss_backup
+    restart: unless-stopped
+    env_file:
+      - ../../.env.guiss
+    environment:
+      BACKUP_INTERVAL_SECONDS: "${BACKUP_INTERVAL_SECONDS:-86400}"
+      BACKUP_KEEP: "${BACKUP_KEEP:-7}"
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - backups:/backups
+      # Bind local pour inspecter/récupérer les dumps depuis le repo infra.
+      - ./backups:/backups-local
+    networks:
+      - guiss-internal
+    depends_on:
+      db:
+        condition: service_healthy
+    # Boucle de sauvegarde : dump compressé horodaté + purge de l'ancien.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        echo "[backup] démarrage — intervalle=$${BACKUP_INTERVAL_SECONDS}s, rétention=$${BACKUP_KEEP}";
+        while true; do
+          ts=$$(date +%Y%m%d-%H%M%S);
+          out="/backups/guiss-$${ts}.sql.gz";
+          echo "[backup] dump -> $${out}";
+          if pg_dump -h db -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}" | gzip > "$${out}"; then
+            cp "$${out}" /backups-local/ 2>/dev/null || true;
+            echo "[backup] OK";
+          else
+            echo "[backup] ECHEC du dump"; rm -f "$${out}";
+          fi;
+          ls -1t /backups/guiss-*.sql.gz 2>/dev/null | tail -n +$$(( $${BACKUP_KEEP} + 1 )) | xargs -r rm -f;
+          sleep "$${BACKUP_INTERVAL_SECONDS}";
+        done
+
+# ==============================================================================
+# Volumes nommés — préfixés par le projet compose (-p guiss) : guiss_postgres_data…
+# ==============================================================================
+volumes:
+  postgres_data:
+  redis_data:
+  hapi_pg_data:
+  backups:
+
+# ==============================================================================
+# Réseaux
+#   traefik-public  : créé par core/docker-compose.yml -> external ici
+#   guiss-internal  : privé au stack (db/redis/hapi + workers).
+#                     Bridge normal (pas internal:true) : celery/beats ont
+#                     besoin d'un accès sortant (SMTP, S3, Gemini, APIs).
+# ==============================================================================
+networks:
+  traefik-public:
+    external: true
+  guiss-internal:
+    driver: bridge

@@ -7,15 +7,19 @@
 ENV_FILE   := .env
 # Sen'Afrik1 a son PROPRE fichier d'env (identifiants/DB/secret DISTINCTS de JanguBi).
 ENV_FILE_SENAFRIK1 := .env.senafrik1
+# Guiss-Talli a aussi son PROPRE fichier d'env (stack apps/guiss, staging).
+ENV_FILE_GUISS := .env.guiss
 CORE       := -f core/docker-compose.yml
 JANGUBI    := -f apps/jangubi/docker-compose.yml
 SENAFRIK1  := -f apps/senafrik1/docker-compose.yml
+GUISS      := -f apps/guiss/docker-compose.yml
 COMPOSE    := docker compose --env-file $(ENV_FILE)
 
 # Projets nommés pour ne pas mélanger les stacks dans `docker compose ls`.
 CORE_P      := -p core
 JANGUBI_P   := -p jangubi
 SENAFRIK1_P := -p senafrik1
+GUISS_P     := -p guiss
 
 # Charge POSTGRES_USER, MINIO_*, AWS_* … comme variables Make (le '-' ignore
 # l'absence de .env). PAS de `export` : docker lit déjà --env-file, et le hash
@@ -27,6 +31,8 @@ COMPOSE_CORE      := $(COMPOSE) $(CORE_P) $(CORE)
 COMPOSE_JANGUBI   := $(COMPOSE) $(JANGUBI_P) $(JANGUBI)
 # Sen'Afrik1 : interpolation + env_file depuis SON fichier dédié (≠ JanguBi).
 COMPOSE_SENAFRIK1 := docker compose --env-file $(ENV_FILE_SENAFRIK1) $(SENAFRIK1_P) $(SENAFRIK1)
+# Guiss : interpolation + env_file depuis SON fichier dédié (≠ JanguBi, ≠ Sen'Afrik1).
+COMPOSE_GUISS := docker compose --env-file $(ENV_FILE_GUISS) $(GUISS_P) $(GUISS)
 
 # Calcule la fin de semaine liturgique (dimanche prochain) pour import_aelf.
 TODAY     := $$(date +%Y-%m-%d)
@@ -38,6 +44,11 @@ NEXT_SUN  := $$(python3 -c 'from datetime import datetime, timedelta; print((dat
         jangubi-up jangubi-down jangubi-logs jangubi-deploy jangubi-rabbitmq-definitions \
         senafrik1-up senafrik1-down senafrik1-logs senafrik1-deploy \
         senafrik1-shell senafrik1-dbshell senafrik1-migrate senafrik1-create-admin \
+        guiss-up guiss-down guiss-logs guiss-deploy \
+        guiss-shell guiss-dbshell guiss-migrate guiss-collectstatic \
+        guiss-create-superuser guiss-create-data-entry-user \
+        guiss-setup-periodic-tasks guiss-init-minio \
+        guiss-celery-logs guiss-celery-restart \
         all-up all-down ps \
         jangubi-shell jangubi-dbshell jangubi-migrate jangubi-makemigrations \
         jangubi-check jangubi-collectstatic jangubi-createsuperuser \
@@ -118,6 +129,22 @@ senafrik1-deploy: ## Déploie un tag précis : make senafrik1-deploy TAG=sha-xxx
 	TAG=$(TAG) $(COMPOSE_SENAFRIK1) pull
 	TAG=$(TAG) $(COMPOSE_SENAFRIK1) up -d
 
+# ---- GUISS (django, nextjs, celery, beats, db, redis, hapi, backup) ---------
+# Staging Guiss-Talli. Tag = nom de branche (develop / stage), jamais un sha.
+guiss-up: ## Démarre la stack Guiss-Talli (staging)
+	$(COMPOSE_GUISS) up -d
+
+guiss-down: ## Arrête la stack Guiss-Talli (conserve les volumes)
+	$(COMPOSE_GUISS) down
+
+guiss-logs: ## Logs de la stack Guiss-Talli (django)
+	$(COMPOSE_GUISS) logs -f django
+
+guiss-deploy: ## Déploie un tag précis : make guiss-deploy TAG=develop
+	@test -n "$(TAG)" || { echo "ERREUR : précisez TAG=... (ex: make guiss-deploy TAG=develop)"; exit 1; }
+	TAG=$(TAG) $(COMPOSE_GUISS) pull
+	TAG=$(TAG) $(COMPOSE_GUISS) up -d
+
 # ============================================================================
 # SENAFRIK1 — exploitation FastAPI (exécuté DANS le conteneur de prod `backend`)
 # Le conteneur prod a WORKDIR /app/src ; on lance depuis /app (-w /app) pour que
@@ -137,6 +164,49 @@ senafrik1-migrate: ## Applique les migrations Alembic (normalement faites au boo
 # (déjà injectés dans l'environnement du conteneur via env_file).
 senafrik1-create-admin: ## Initialise l'utilisateur admin (lit ADMIN_* du .env.senafrik1)
 	$(COMPOSE_SENAFRIK1) exec -w /app backend python -m src.scripts.create_admin
+
+# ============================================================================
+# GUISS — exploitation Django (exécuté DANS le conteneur `django` du stack)
+# Équivalents des cibles du Makefile de l'infra Guiss prod, adaptés au staging.
+# ============================================================================
+guiss-shell: ## Shell Django Guiss (python manage.py shell)
+	$(COMPOSE_GUISS) exec django python manage.py shell
+
+guiss-dbshell: ## Shell PostgreSQL (psql) du stack Guiss
+	$(COMPOSE_GUISS) exec db sh -c 'psql -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"'
+
+guiss-migrate: ## Applique les migrations Django (normalement faites au boot)
+	$(COMPOSE_GUISS) exec django python manage.py migrate
+
+guiss-collectstatic: ## Collecte les fichiers statiques
+	$(COMPOSE_GUISS) exec django python manage.py collectstatic --noinput
+
+guiss-create-superuser: ## Crée le super-utilisateur de test (non interactif)
+	$(COMPOSE_GUISS) exec django python manage.py create_test_superuser
+
+guiss-create-data-entry-user: ## Crée un utilisateur saisie de données
+	$(COMPOSE_GUISS) exec django python manage.py create_data_entry_user
+
+guiss-setup-periodic-tasks: ## Enregistre les tâches Celery Beat en base (DatabaseScheduler)
+	$(COMPOSE_GUISS) exec django python manage.py setup_periodic_tasks
+
+# MinIO vit dans le stack CORE : la création du bucket cible `-p core`, avec
+# l'endpoint LOCAL au conteneur (127.0.0.1:9000). Le nom du bucket est lu dans
+# .env.guiss (AWS_STORAGE_BUCKET_NAME) — pas de -include pour éviter que son
+# TAG=develop ne contamine les autres cibles *-deploy.
+guiss-init-minio: ## Crée le bucket MinIO staging de Guiss (privé)
+	@BUCKET=$$(grep -E '^AWS_STORAGE_BUCKET_NAME=' $(ENV_FILE_GUISS) | head -1 | cut -d= -f2-); \
+	 test -n "$$BUCKET" || { echo "ERREUR : AWS_STORAGE_BUCKET_NAME absent de $(ENV_FILE_GUISS)"; exit 1; }; \
+	 $(COMPOSE_CORE) exec minio sh -c "\
+		mc alias set local http://127.0.0.1:9000 $(MINIO_ROOT_USER) $(MINIO_ROOT_PASSWORD) && \
+		mc mb --ignore-existing local/$$BUCKET && \
+		mc anonymous set none local/$$BUCKET"
+
+guiss-celery-logs: ## Logs du worker Celery Guiss
+	$(COMPOSE_GUISS) logs -f celery
+
+guiss-celery-restart: ## Redémarre le worker Celery Guiss (recharge le code des tâches)
+	$(COMPOSE_GUISS) restart celery
 
 # ---- Global ----------------------------------------------------------------
 all-up: core-up jangubi-up ## Démarre core puis JanguBi (dans l'ordre)

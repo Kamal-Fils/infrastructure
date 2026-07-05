@@ -5,6 +5,9 @@
 # Sen'Afrik1 a son propre fichier d'env ; ignorer le réel, garder l'exemple.
 .env.senafrik1
 !.env.senafrik1.example
+# Guiss-Talli a son propre fichier d'env ; ignorer le réel, garder l'exemple.
+.env.guiss
+!.env.guiss.example
 
 # RabbitMQ : definitions.json rendu contient le mot de passe broker EN CLAIR.
 # Seul le template (definitions.tpl.json) est committé.
@@ -18,6 +21,10 @@ letsencrypt/
 # On garde le dossier (.gitkeep) mais jamais les dumps (données + volumineux).
 apps/senafrik1/backups/*
 !apps/senafrik1/backups/.gitkeep
+
+# Dumps de sauvegarde Postgres Guiss (générés par le service `backup`).
+apps/guiss/backups/*
+!apps/guiss/backups/.gitkeep
 
 # Divers
 *.log
