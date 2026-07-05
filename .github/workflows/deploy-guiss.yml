@@ -1,0 +1,73 @@
+name: Deploy Guiss staging
+
+# Reçoit les repository_dispatch des CI GuissAPI (deploy-guiss-backend) et
+# GuissUI (deploy-guiss-frontend) pour develop/stage, et déploie apps/guiss/
+# sur CE serveur (staging mutualisé Kamal&Fils).
+#
+# /!\ Types d'événement DÉDIÉS deploy-guiss-* : deploy-backend/deploy-frontend
+#     sont déjà consommés par deploy.yml (JanguBi) — des types partagés
+#     déclencheraient les deux stacks à chaque push.
+#
+# La prod Guiss a son propre repo infra (guisstalli/infrastructure) — les
+# dispatches main/v* y seront routés par les CI des apps au moment de la
+# bascule, pas ici.
+
+on:
+  repository_dispatch:
+    types:
+      - deploy-guiss-backend
+      - deploy-guiss-frontend
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag de déploiement (develop / stage)"
+        required: false
+        default: "develop"
+
+# Un seul déploiement Guiss à la fois ; on n'interrompt pas un déploiement
+# en cours (cancel-in-progress: false).
+concurrency:
+  group: deploy-guiss-staging
+  cancel-in-progress: false
+
+jobs:
+  deploy-staging:
+    runs-on: ubuntu-24.04
+    # Ceinture + bretelles : même si un dispatch inattendu arrive (ref main),
+    # on ne déploie ici que develop/stage — ce workflow ne connaît QUE le staging.
+    if: |
+      github.event_name == 'workflow_dispatch'
+      || contains(fromJSON('["develop", "stage"]'), github.event.client_payload.ref)
+
+    steps:
+      - name: Résoudre le tag
+        id: vars
+        run: |
+          TAG="${{ github.event.client_payload.tag || github.event.inputs.tag || 'develop' }}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Configurer SSH (webfactory/ssh-agent)
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.STAGING_SSH_PRIVATE_KEY }}
+
+      - name: Ajouter le serveur aux known hosts
+        run: ssh-keyscan -H ${{ secrets.STAGING_SSH_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Déployer la stack Guiss
+        env:
+          TAG: ${{ steps.vars.outputs.tag }}
+        run: |
+          ssh ${{ secrets.STAGING_SSH_USER }}@${{ secrets.STAGING_SSH_HOST }} \
+              "set -e
+               cd /opt/kamalfils/infrastructure
+               git pull
+               make guiss-deploy TAG=$TAG
+               make ps"
+
+      - name: Résumé
+        run: |
+          echo "## Guiss staging déployé"                    >> $GITHUB_STEP_SUMMARY
+          echo "- Tag : ${{ steps.vars.outputs.tag }}"       >> $GITHUB_STEP_SUMMARY
+          echo "- API : https://api-guiss.kamalfils.app"     >> $GITHUB_STEP_SUMMARY
+          echo "- App : https://guiss.kamalfils.app"         >> $GITHUB_STEP_SUMMARY
