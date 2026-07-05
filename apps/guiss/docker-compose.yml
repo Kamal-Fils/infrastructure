@@ -242,14 +242,18 @@ services:
     image: hapiproject/hapi:v7.4.0
     container_name: guiss_hapi
     restart: unless-stopped
-    mem_limit: 768m
+    mem_limit: 1g
     environment:
-      JAVA_TOOL_OPTIONS: "-Xms128m -Xmx384m"
+      JAVA_TOOL_OPTIONS: "-Xms128m -Xmx512m"
       SPRING_DATASOURCE_URL: "jdbc:postgresql://hapi-db:5432/${HAPI_DB_NAME:-hapi}"
       SPRING_DATASOURCE_USERNAME: "${HAPI_DB_USER:-hapi}"
       SPRING_DATASOURCE_PASSWORD: "${HAPI_DB_PASSWORD}"
       SPRING_DATASOURCE_DRIVERCLASSNAME: "org.postgresql.Driver"
-      SPRING_JPA_PROPERTIES_HIBERNATE_DIALECT: "ca.uhn.fhir.jpa.model.dialect.HapiFhirPostgresDialect"
+      # PIÈGE : la forme SPRING_JPA_PROPERTIES_HIBERNATE_DIALECT ne se lie PAS
+      # (clé de map avec points) — Hibernate retombait sur le dialecte H2 et
+      # générait des colonnes `clob` que PostgreSQL rejette → schéma jamais
+      # créé. La forme POINTÉE est celle de la doc officielle de l'image.
+      "spring.jpa.properties.hibernate.dialect": "ca.uhn.fhir.jpa.model.dialect.HapiFhirPostgresDialect"
       SPRING_JPA_HIBERNATE_DDL_AUTO: "update"
       HAPI_FHIR_VERSION: "R4"
     depends_on:
