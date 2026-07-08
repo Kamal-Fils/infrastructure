@@ -9,10 +9,13 @@ ENV_FILE   := .env
 ENV_FILE_SENAFRIK1 := .env.senafrik1
 # Guiss-Talli a aussi son PROPRE fichier d'env (stack apps/guiss, staging).
 ENV_FILE_GUISS := .env.guiss
+# Jaaykoo a aussi son PROPRE fichier d'env (stack apps/jaaykoo, staging).
+ENV_FILE_JAAYKOO := .env.jaaykoo
 CORE       := -f core/docker-compose.yml
 JANGUBI    := -f apps/jangubi/docker-compose.yml
 SENAFRIK1  := -f apps/senafrik1/docker-compose.yml
 GUISS      := -f apps/guiss/docker-compose.yml
+JAAYKOO    := -f apps/jaaykoo/docker-compose.yml
 COMPOSE    := docker compose --env-file $(ENV_FILE)
 
 # Projets nommés pour ne pas mélanger les stacks dans `docker compose ls`.
@@ -20,6 +23,7 @@ CORE_P      := -p core
 JANGUBI_P   := -p jangubi
 SENAFRIK1_P := -p senafrik1
 GUISS_P     := -p guiss
+JAAYKOO_P   := -p jaaykoo
 
 # Charge POSTGRES_USER, MINIO_*, AWS_* … comme variables Make (le '-' ignore
 # l'absence de .env). PAS de `export` : docker lit déjà --env-file, et le hash
@@ -33,6 +37,8 @@ COMPOSE_JANGUBI   := $(COMPOSE) $(JANGUBI_P) $(JANGUBI)
 COMPOSE_SENAFRIK1 := docker compose --env-file $(ENV_FILE_SENAFRIK1) $(SENAFRIK1_P) $(SENAFRIK1)
 # Guiss : interpolation + env_file depuis SON fichier dédié (≠ JanguBi, ≠ Sen'Afrik1).
 COMPOSE_GUISS := docker compose --env-file $(ENV_FILE_GUISS) $(GUISS_P) $(GUISS)
+# Jaaykoo : interpolation + env_file depuis SON fichier dédié (≠ des 3 autres stacks).
+COMPOSE_JAAYKOO := docker compose --env-file $(ENV_FILE_JAAYKOO) $(JAAYKOO_P) $(JAAYKOO)
 
 # Calcule la fin de semaine liturgique (dimanche prochain) pour import_aelf.
 TODAY     := $$(date +%Y-%m-%d)
@@ -49,6 +55,10 @@ NEXT_SUN  := $$(python3 -c 'from datetime import datetime, timedelta; print((dat
         guiss-create-superuser \
         guiss-setup-periodic-tasks guiss-init-minio \
         guiss-celery-logs guiss-celery-restart \
+        jaaykoo-up jaaykoo-down jaaykoo-logs jaaykoo-deploy \
+        jaaykoo-shell jaaykoo-dbshell jaaykoo-migrate jaaykoo-collectstatic \
+        jaaykoo-create-superuser jaaykoo-setup-periodic-tasks jaaykoo-init-minio \
+        jaaykoo-celery-logs jaaykoo-celery-restart jaaykoo-rabbitmq-stats \
         all-up all-down ps \
         jangubi-shell jangubi-dbshell jangubi-migrate jangubi-makemigrations \
         jangubi-check jangubi-collectstatic jangubi-createsuperuser \
@@ -145,6 +155,22 @@ guiss-deploy: ## Déploie un tag précis : make guiss-deploy TAG=develop
 	TAG=$(TAG) $(COMPOSE_GUISS) pull
 	TAG=$(TAG) $(COMPOSE_GUISS) up -d
 
+# ---- JAAYKOO (django, storefront, admin, celery, beats, db, redis, rabbitmq, backup)
+# Staging Jaaykoo e-commerce. Tag = nom de branche (develop / stage), jamais un sha.
+jaaykoo-up: ## Démarre la stack Jaaykoo (staging)
+	$(COMPOSE_JAAYKOO) up -d
+
+jaaykoo-down: ## Arrête la stack Jaaykoo (conserve les volumes)
+	$(COMPOSE_JAAYKOO) down
+
+jaaykoo-logs: ## Logs de la stack Jaaykoo (django)
+	$(COMPOSE_JAAYKOO) logs -f django
+
+jaaykoo-deploy: ## Déploie un tag précis : make jaaykoo-deploy TAG=develop
+	@test -n "$(TAG)" || { echo "ERREUR : précisez TAG=... (ex: make jaaykoo-deploy TAG=develop)"; exit 1; }
+	TAG=$(TAG) $(COMPOSE_JAAYKOO) pull
+	TAG=$(TAG) $(COMPOSE_JAAYKOO) up -d
+
 # ============================================================================
 # SENAFRIK1 — exploitation FastAPI (exécuté DANS le conteneur de prod `backend`)
 # Le conteneur prod a WORKDIR /app/src ; on lance depuis /app (-w /app) pour que
@@ -211,6 +237,56 @@ guiss-celery-logs: ## Logs du worker Celery Guiss
 
 guiss-celery-restart: ## Redémarre le worker Celery Guiss (recharge le code des tâches)
 	$(COMPOSE_GUISS) restart celery
+
+# ============================================================================
+# JAAYKOO — exploitation Django (exécuté DANS le conteneur `django` du stack)
+# Mêmes équivalents que Guiss, adaptés au projet (settings config.django.*,
+# broker Celery = RabbitMQ, DB pgvector).
+# ============================================================================
+jaaykoo-shell: ## Shell Django Jaaykoo (python manage.py shell)
+	$(COMPOSE_JAAYKOO) exec django python manage.py shell
+
+jaaykoo-dbshell: ## Shell PostgreSQL (psql) du stack Jaaykoo
+	$(COMPOSE_JAAYKOO) exec db sh -c 'psql -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"'
+
+jaaykoo-migrate: ## Applique les migrations Django (normalement faites au boot)
+	$(COMPOSE_JAAYKOO) exec django python manage.py migrate
+
+jaaykoo-collectstatic: ## Collecte les fichiers statiques
+	$(COMPOSE_JAAYKOO) exec django python manage.py collectstatic --noinput
+
+# User model email-based → createsuperuser --noinput --email suffit.
+jaaykoo-create-superuser: ## Crée le superuser (lit ADMIN_EMAIL/ADMIN_PASSWORD du .env.jaaykoo)
+	@EMAIL=$$(grep -E '^ADMIN_EMAIL=' $(ENV_FILE_JAAYKOO) | head -1 | cut -d= -f2-); \
+	 PASS=$$(grep -E '^ADMIN_PASSWORD=' $(ENV_FILE_JAAYKOO) | head -1 | cut -d= -f2-); \
+	 [ -n "$$EMAIL" ] && [ -n "$$PASS" ] || { echo "ERREUR : ADMIN_EMAIL/ADMIN_PASSWORD absents de $(ENV_FILE_JAAYKOO)"; exit 1; }; \
+	 $(COMPOSE_JAAYKOO) exec -e DJANGO_SUPERUSER_PASSWORD="$$PASS" django \
+	   python manage.py createsuperuser --noinput --email "$$EMAIL" \
+	   || echo "(superuser déjà existant ?)"
+
+jaaykoo-setup-periodic-tasks: ## Enregistre les tâches Celery Beat en base (DatabaseScheduler)
+	$(COMPOSE_JAAYKOO) exec django python manage.py setup_periodic_tasks
+
+# MinIO vit dans le stack CORE : la création du bucket cible `-p core`, avec
+# l'endpoint LOCAL au conteneur (127.0.0.1:9000). Le nom du bucket est lu dans
+# .env.jaaykoo (AWS_STORAGE_BUCKET_NAME) — pas de -include pour éviter que son
+# TAG=develop ne contamine les autres cibles *-deploy.
+jaaykoo-init-minio: ## Crée le bucket MinIO staging de Jaaykoo (privé)
+	@BUCKET=$$(grep -E '^AWS_STORAGE_BUCKET_NAME=' $(ENV_FILE_JAAYKOO) | head -1 | cut -d= -f2-); \
+	 test -n "$$BUCKET" || { echo "ERREUR : AWS_STORAGE_BUCKET_NAME absent de $(ENV_FILE_JAAYKOO)"; exit 1; }; \
+	 $(COMPOSE_CORE) exec minio sh -c "\
+		mc alias set local http://127.0.0.1:9000 $(MINIO_ROOT_USER) $(MINIO_ROOT_PASSWORD) && \
+		mc mb --ignore-existing local/$$BUCKET && \
+		mc anonymous set none local/$$BUCKET"
+
+jaaykoo-celery-logs: ## Logs du worker Celery Jaaykoo
+	$(COMPOSE_JAAYKOO) logs -f celery
+
+jaaykoo-celery-restart: ## Redémarre le worker Celery Jaaykoo (recharge le code des tâches)
+	$(COMPOSE_JAAYKOO) restart celery
+
+jaaykoo-rabbitmq-stats: ## Liste les files RabbitMQ Jaaykoo
+	$(COMPOSE_JAAYKOO) exec rabbitmq rabbitmqctl list_queues
 
 # ---- Global ----------------------------------------------------------------
 all-up: core-up jangubi-up ## Démarre core puis JanguBi (dans l'ordre)
