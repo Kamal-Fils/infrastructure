@@ -8,6 +8,9 @@
 # Guiss-Talli a son propre fichier d'env ; ignorer le réel, garder l'exemple.
 .env.guiss
 !.env.guiss.example
+# Jaaykoo a son propre fichier d'env ; ignorer le réel, garder l'exemple.
+.env.jaaykoo
+!.env.jaaykoo.example
 
 # RabbitMQ : definitions.json rendu contient le mot de passe broker EN CLAIR.
 # Seul le template (definitions.tpl.json) est committé.
@@ -25,6 +28,10 @@ apps/senafrik1/backups/*
 # Dumps de sauvegarde Postgres Guiss (générés par le service `backup`).
 apps/guiss/backups/*
 !apps/guiss/backups/.gitkeep
+
+# Dumps de sauvegarde Postgres Jaaykoo (générés par le service `backup`).
+apps/jaaykoo/backups/*
+!apps/jaaykoo/backups/.gitkeep
 
 # Divers
 *.log

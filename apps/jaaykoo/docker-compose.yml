@@ -1,0 +1,357 @@
+# ==============================================================================
+# APP — Jaaykoo e-commerce (staging) sur kamalfils.app
+#
+#   django      -> api-jaaykoo.kamalfils.app    (Daphne / ASGI, port 8000)
+#   storefront  -> jaaykoo.kamalfils.app        (ClientBridgeUI, Next.js standalone, port 3000)
+#   admin       -> admin-jaaykoo.kamalfils.app  (AdminUI, Next.js standalone, port 3000)
+#   celery      worker asynchrone (apps.tasks)                        — non exposé
+#   beats       planificateur (django-celery-beat, scheduler en base) — non exposé
+#   db          PostgreSQL 17 + pgvector        (interne, jamais exposé)
+#   redis       cache Django + Channels + résultats Celery (interne)
+#   rabbitmq    broker Celery                   (interne)
+#   backup      dump pg_dump périodique du Postgres                   — non exposé
+#
+# /!\ RAM : ce serveur est mutualisé avec JanguBi, Sen'Afrik1 et Guiss.
+#     La stack Jaaykoo ajoute ~9 conteneurs — surveiller la mémoire (uptime-kuma /
+#     Grafana du core). Si OOM, upgrader le droplet avant d'insister.
+#
+# Les images viennent de DockerHub, construites par la CI des apps :
+#   ${DOCKERHUB_USERNAME}/jaaykoo-backend:${TAG}      (repo Jaaykoo/api)
+#   ${DOCKERHUB_USERNAME}/jaaykoo-storefront:${TAG}   (repo Jaaykoo/ClientBridgeUI)
+#   ${DOCKERHUB_USERNAME}/jaaykoo-admin:${TAG}        (repo Jaaykoo/AdminUI)
+#
+# Tag de déploiement = nom de branche (develop / stage) — jamais un sha par
+# commit car les 3 repos ont des SHAs distincts.
+#
+# Architecture auth (httpOnly same-site) : les fronts servent l'API sous LEUR
+# origine via les rewrites Next (`/api/*` et `/ws/*` → API_PROXY_TARGET). Le
+# navigateur ne parle donc JAMAIS directement à api-jaaykoo — le cookie httpOnly
+# est posé/relayé sur l'origine du front. API_PROXY_TARGET est une env de
+# RUNTIME (server-side) → http://django:8000 sur le réseau interne.
+#
+# Réseaux :
+#   traefik-public    EXTERNAL — créé par core/, sert l'ingress (django, fronts)
+#   jaaykoo-internal  privé au stack — db/redis/rabbitmq/celery/beats
+#                     Bridge NORMAL (pas internal:true) : celery/beats ont besoin
+#                     d'un accès sortant (SMTP, S3, webhooks Wave/OM, APIs).
+#
+# DNS (À FAIRE AVANT le 1er `up`, sinon le challenge HTTP Let's Encrypt échoue) :
+#   créer les enregistrements A
+#     api-jaaykoo.kamalfils.app    -> 164.92.238.231
+#     jaaykoo.kamalfils.app        -> 164.92.238.231
+#     admin-jaaykoo.kamalfils.app  -> 164.92.238.231
+#
+# Déploiement :  make jaaykoo-deploy TAG=develop   (depuis infrastructure/)
+# ==============================================================================
+
+# Base commune aux 3 services qui partagent l'image backend.
+x-backend: &backend
+  image: ${DOCKERHUB_USERNAME}/jaaykoo-backend:${TAG:-develop}
+  restart: unless-stopped
+  env_file:
+    # Fichier DÉDIÉ à Jaaykoo (≠ .env racine de JanguBi, ≠ .env.senafrik1,
+    # ≠ .env.guiss) — identifiants/DB/secret PROPRES. Le Makefile passe aussi
+    # `--env-file .env.jaaykoo` pour l'interpolation.
+    - ../../.env.jaaykoo
+  networks:
+    - jaaykoo-internal
+
+services:
+  # ===========================================================================
+  # Django (ASGI / Daphne) — seul service backend exposé à Traefik.
+  # L'ENTRYPOINT de l'image vérifie les extensions PG (pg_trgm, vector),
+  # bootstrappe le bucket S3, applique les migrations et enregistre les tâches
+  # périodiques, puis démarre Daphne. On ne le surcharge PAS ici
+  # (contrairement à celery/beats).
+  # ===========================================================================
+  django:
+    <<: *backend
+    container_name: jaaykoo_django
+    command: daphne -b 0.0.0.0 -p 8000 config.asgi:application
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - jaaykoo-internal
+      - traefik-public
+    healthcheck:
+      # Teste le socket TCP — pas de curl dans l'image slim.
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8000), 3).close()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-public"
+      # --- Routeur HTTPS -> api-jaaykoo.kamalfils.app ---
+      # Pas de middleware CORS Traefik ici : django-cors-headers gère CORS via
+      # CORS_ALLOWED_ORIGINS (.env.jaaykoo), et les fronts passent de toute
+      # façon par leur proxy same-origin (double en-tête CORS = requêtes
+      # rejetées par le navigateur).
+      - "traefik.http.routers.jaaykoo-api.rule=Host(`api-jaaykoo.kamalfils.app`)"
+      - "traefik.http.routers.jaaykoo-api.entrypoints=websecure"
+      - "traefik.http.routers.jaaykoo-api.tls=true"
+      - "traefik.http.routers.jaaykoo-api.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.jaaykoo-api.service=jaaykoo-api-svc"
+      # --- WebSocket (notifications) : les rewrites Next ne proxifient PAS
+      #     l'upgrade WS en production — on route /ws des domaines fronts
+      #     directement vers Daphne. Règle Host+PathPrefix plus longue que les
+      #     routeurs des fronts → priorité Traefik automatique. Nécessite les
+      #     domaines fronts dans ALLOWED_HOSTS (.env.jaaykoo).
+      - "traefik.http.routers.jaaykoo-ws.rule=(Host(`jaaykoo.kamalfils.app`) || Host(`admin-jaaykoo.kamalfils.app`)) && PathPrefix(`/ws`)"
+      - "traefik.http.routers.jaaykoo-ws.entrypoints=websecure"
+      - "traefik.http.routers.jaaykoo-ws.tls=true"
+      - "traefik.http.routers.jaaykoo-ws.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.jaaykoo-ws.service=jaaykoo-api-svc"
+      # --- Service (port Daphne) ---
+      - "traefik.http.services.jaaykoo-api-svc.loadbalancer.server.port=8000"
+
+  # ===========================================================================
+  # Storefront (ClientBridgeUI, Next.js standalone) — vitrine client.
+  # NEXT_PUBLIC_API_BASE_URL=/api est baké au build (chemin relatif, valable
+  # partout). API_PROXY_TARGET est lu au RUNTIME par les rewrites Next.
+  # ===========================================================================
+  storefront:
+    image: ${DOCKERHUB_USERNAME}/jaaykoo-storefront:${TAG:-develop}
+    container_name: jaaykoo_storefront
+    restart: unless-stopped
+    command: node server.js
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      HOSTNAME: "0.0.0.0"
+      # Cible du proxy same-origin /api et /ws — réseau interne Docker.
+      API_PROXY_TARGET: http://django:8000
+    depends_on:
+      django:
+        condition: service_healthy
+    networks:
+      - jaaykoo-internal
+      - traefik-public
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-public"
+      - "traefik.http.routers.jaaykoo-web.rule=Host(`jaaykoo.kamalfils.app`)"
+      - "traefik.http.routers.jaaykoo-web.entrypoints=websecure"
+      - "traefik.http.routers.jaaykoo-web.tls=true"
+      - "traefik.http.routers.jaaykoo-web.tls.certresolver=letsencrypt"
+      - "traefik.http.services.jaaykoo-web.loadbalancer.server.port=3000"
+
+  # ===========================================================================
+  # Admin (AdminUI, Next.js standalone) — dashboard staff/admin.
+  # /!\ L'image doit avoir été buildée avec NEXT_PUBLIC_API_URL =
+  #     https://admin-jaaykoo.kamalfils.app/api (env GitHub `staging` d'AdminUI)
+  #     — Env.ts (zod) exige une URL absolue ; le /api reste servi same-origin
+  #     par les rewrites du front.
+  # ===========================================================================
+  admin:
+    image: ${DOCKERHUB_USERNAME}/jaaykoo-admin:${TAG:-develop}
+    container_name: jaaykoo_admin
+    restart: unless-stopped
+    command: node server.js
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      HOSTNAME: "0.0.0.0"
+      API_PROXY_TARGET: http://django:8000
+    depends_on:
+      django:
+        condition: service_healthy
+    networks:
+      - jaaykoo-internal
+      - traefik-public
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-public"
+      - "traefik.http.routers.jaaykoo-admin.rule=Host(`admin-jaaykoo.kamalfils.app`)"
+      - "traefik.http.routers.jaaykoo-admin.entrypoints=websecure"
+      - "traefik.http.routers.jaaykoo-admin.tls=true"
+      - "traefik.http.routers.jaaykoo-admin.tls.certresolver=letsencrypt"
+      - "traefik.http.services.jaaykoo-admin.loadbalancer.server.port=3000"
+
+  # ===========================================================================
+  # Celery worker — NON exposé à Traefik. N'exécute pas les migrations
+  # (Django en est l'unique propriétaire) : on neutralise l'entrypoint.
+  # Concurrency 2 (staging mutualisé).
+  # ===========================================================================
+  celery:
+    <<: *backend
+    container_name: jaaykoo_celery
+    entrypoint: []
+    command: celery -A apps.tasks worker -l INFO -c 2
+    depends_on:
+      django:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # Le HEALTHCHECK de l'image teste le socket 8000 (Daphne) — faux négatif
+    # permanent pour un worker. Ping Celery via le broker SEUL (-b) : avec
+    # -A apps.tasks, chaque check réimporte tout Django et timeout à froid.
+    healthcheck:
+      test: ["CMD-SHELL", "celery -b \"$$CELERY_BROKER_URL\" inspect ping -d \"celery@$$HOSTNAME\" --timeout 10 | grep -q pong"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 60s
+
+  # ===========================================================================
+  # Celery beat — planificateur. Le scheduler lit ses tâches en base
+  # (django_celery_beat), donc il démarre après que Django ait migré.
+  # ===========================================================================
+  beats:
+    <<: *backend
+    container_name: jaaykoo_beats
+    entrypoint: []
+    command: celery -A apps.tasks beat -l INFO --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    depends_on:
+      django:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # beat n'expose ni socket ni ping — on désactive le HEALTHCHECK hérité
+    # de l'image (socket 8000) qui le marquerait unhealthy à tort.
+    healthcheck:
+      disable: true
+
+  # ===========================================================================
+  # PostgreSQL + pgvector — base principale Django (recherche sémantique
+  # 1536-dim dans apps/search). Interne, pas de port mappé sur l'hôte.
+  # ===========================================================================
+  db:
+    image: pgvector/pgvector:pg17
+    container_name: jaaykoo_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Extensions (vector, pg_trgm, unaccent, uuid-ossp) créées au 1er boot.
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - jaaykoo-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===========================================================================
+  # Redis — cache Django + Channels + résultats Celery (DB 1).
+  # Protégé par mot de passe (REDIS_PASSWORD). Le broker Celery est RabbitMQ.
+  # ===========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: jaaykoo_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+    networks:
+      - jaaykoo-internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===========================================================================
+  # RabbitMQ — broker Celery (même topologie que le compose local de l'api).
+  # /!\ RABBITMQ_DEFAULT_USER/PASS ne sont appliqués QUE sur un volume VIDE
+  #     (premier boot). Pour changer les identifiants ensuite : rabbitmqctl.
+  # Console de management NON exposée (interne uniquement).
+  # ===========================================================================
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    container_name: jaaykoo_rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - jaaykoo-internal
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ===========================================================================
+  # Backup Postgres — dump périodique vers le volume `jaaykoo_backups`
+  # (monté aussi en bind sur ./backups pour récupération manuelle).
+  # Même stratégie que Guiss/Sen'Afrik1 : boucle pg_dump compressé + rétention.
+  # ===========================================================================
+  backup:
+    image: pgvector/pgvector:pg17
+    container_name: jaaykoo_backup
+    restart: unless-stopped
+    env_file:
+      - ../../.env.jaaykoo
+    environment:
+      BACKUP_INTERVAL_SECONDS: "${BACKUP_INTERVAL_SECONDS:-86400}"
+      BACKUP_KEEP: "${BACKUP_KEEP:-7}"
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - backups:/backups
+      # Bind local pour inspecter/récupérer les dumps depuis le repo infra.
+      - ./backups:/backups-local
+    networks:
+      - jaaykoo-internal
+    depends_on:
+      db:
+        condition: service_healthy
+    # Boucle de sauvegarde : dump compressé horodaté + purge de l'ancien.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        echo "[backup] démarrage — intervalle=$${BACKUP_INTERVAL_SECONDS}s, rétention=$${BACKUP_KEEP}";
+        while true; do
+          ts=$$(date +%Y%m%d-%H%M%S);
+          out="/backups/jaaykoo-$${ts}.sql.gz";
+          echo "[backup] dump -> $${out}";
+          if pg_dump -h db -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}" | gzip > "$${out}"; then
+            cp "$${out}" /backups-local/ 2>/dev/null || true;
+            echo "[backup] OK";
+          else
+            echo "[backup] ECHEC du dump"; rm -f "$${out}";
+          fi;
+          ls -1t /backups/jaaykoo-*.sql.gz 2>/dev/null | tail -n +$$(( $${BACKUP_KEEP} + 1 )) | xargs -r rm -f;
+          sleep "$${BACKUP_INTERVAL_SECONDS}";
+        done
+
+# ==============================================================================
+# Volumes nommés — préfixés par le projet compose (-p jaaykoo) : jaaykoo_postgres_data…
+# ==============================================================================
+volumes:
+  postgres_data:
+  redis_data:
+  rabbitmq_data:
+  backups:
+
+# ==============================================================================
+# Réseaux
+#   traefik-public    : créé par core/docker-compose.yml -> external ici
+#   jaaykoo-internal  : privé au stack (db/redis/rabbitmq + workers).
+#                       Bridge normal (pas internal:true) : celery/beats ont
+#                       besoin d'un accès sortant (SMTP, S3, webhooks, APIs).
+# ==============================================================================
+networks:
+  traefik-public:
+    external: true
+  jaaykoo-internal:
+    driver: bridge
