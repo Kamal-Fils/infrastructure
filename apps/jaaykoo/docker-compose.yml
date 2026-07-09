@@ -289,6 +289,9 @@ services:
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS}
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
+      # RabbitMQ 4.1 refuse les queues transient non-exclusives que Celery
+      # (pidbox/mingle) déclare → worker en crash-loop. Re-permet la feature.
+      - ./rabbitmq/10-deprecated-features.conf:/etc/rabbitmq/conf.d/10-deprecated-features.conf:ro
     networks:
       - jaaykoo-internal
     healthcheck:
