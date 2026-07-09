@@ -68,6 +68,14 @@ services:
     <<: *backend
     container_name: jaaykoo_django
     command: daphne -b 0.0.0.0 -p 8000 config.asgi:application
+    environment:
+      # Tout le trafic navigateur passe par le proxy same-origin des fronts
+      # (rewrites Next) : ce hop interne est en HTTP pur et Next ne retransmet
+      # pas X-Forwarded-Proto → avec SECURE_SSL_REDIRECT=True Django renvoie
+      # 301 vers /api/... en boucle. La redirection http→https est déjà
+      # imposée au bord par Traefik (entrypoint websecure) ; Django ne doit
+      # donc PAS rediriger. Prime sur la valeur du .env.jaaykoo.
+      SECURE_SSL_REDIRECT: "False"
     depends_on:
       db:
         condition: service_healthy
