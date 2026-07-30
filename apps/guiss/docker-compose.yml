@@ -108,6 +108,18 @@ services:
       # Sans eux, next-auth répond 307 /api/auth/error?error=Configuration.
       NEXTAUTH_URL: ${NEXTAUTH_URL}
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
+      # API CIM-11 de l'OMS : lue par le route handler
+      # src/app/api/icd/search/route.ts, donc à l'EXÉCUTION et côté serveur.
+      # Même régime que NextAuth ci-dessus, et pour les mêmes raisons : ni
+      # build-arg (un build-arg reste lisible dans les couches de l'image),
+      # ni secret GitHub Actions (qui n'existe que le temps du job CI et
+      # n'entre jamais dans le conteneur).
+      # À déclarer ICI *et* dans .env.guiss : ce service n'a pas d'`env_file`,
+      # il ne reçoit donc QUE ce qui est nommé dans ce bloc.
+      # Sans elles, la recherche de symptômes échoue en silence : le handler
+      # lève « ICD credentials not configured » et renvoie une liste vide.
+      ICD_CLIENT_ID: ${ICD_CLIENT_ID}
+      ICD_CLIENT_SECRET: ${ICD_CLIENT_SECRET}
     depends_on:
       - django
     networks:
