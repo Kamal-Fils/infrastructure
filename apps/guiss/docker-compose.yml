@@ -342,7 +342,7 @@ volumes:
 #                     besoin d'un accès sortant (SMTP, S3, Gemini, APIs).
 # ==============================================================================
 networks:
-  traefik-public:
-    external: true
   guiss-internal:
-    driver: bridge
+  traefik-public:
+    aliases:
+      - guiss-api-interne
