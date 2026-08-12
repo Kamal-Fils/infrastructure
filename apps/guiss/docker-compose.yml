@@ -120,6 +120,7 @@ services:
       # lève « ICD credentials not configured » et renvoie une liste vide.
       ICD_CLIENT_ID: ${ICD_CLIENT_ID}
       ICD_CLIENT_SECRET: ${ICD_CLIENT_SECRET}
+      INTERNAL_API_URL: ${INTERNAL_API_URL}
     depends_on:
       - django
     networks:
