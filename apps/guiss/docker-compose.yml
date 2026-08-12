@@ -63,8 +63,24 @@ services:
       redis:
         condition: service_healthy
     networks:
-      - guiss-internal
-      - traefik-public
+      guiss-internal:
+      # Alias pour les appels serveur-a-serveur depuis Next.js (connexion,
+      # refresh). Forme dictionnaire obligatoire : la forme liste n'accepte pas
+      # `aliases`.
+      #
+      # Pourquoi un alias plutot qu'un nom existant :
+      #   - `guiss_django` (container_name) : Django REJETTE l'en-tete Host,
+      #     le tiret bas etant interdit par les RFC 1034/1035 — erreur 400
+      #     DisallowedHost, quoi qu'on mette dans ALLOWED_HOSTS.
+      #   - `django` (nom de service) : valide, mais `traefik-public` est le
+      #     reseau MUTUALISE du serveur ; un nom aussi generique peut etre
+      #     revendique par un autre projet et la resolution devient ambigue.
+      #
+      # `guiss-api-interne` : sans tiret bas, et propre a ce projet.
+      # A reporter dans ALLOWED_HOSTS et INTERNAL_API_URL (.env.guiss).
+      traefik-public:
+        aliases:
+          - guiss-api-interne
     healthcheck:
       # Teste le socket TCP — pas de curl dans l'image slim.
       test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8000), 3).close()"]
@@ -343,6 +359,10 @@ volumes:
 # ==============================================================================
 networks:
   guiss-internal:
+    driver: bridge
+  # Reseau MUTUALISE du serveur, cree par la stack `core`. Les alias reseau ne
+  # se declarent PAS ici mais dans le bloc `networks:` du service concerne (voir
+  # `django` plus haut) — les poser ici fait echouer la validation :
+  #   networks.traefik-public additional properties 'aliases' not allowed
   traefik-public:
-    aliases:
-      - guiss-api-interne
+    external: true
