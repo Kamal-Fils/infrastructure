@@ -141,8 +141,22 @@ services:
       - django
     networks:
       - traefik-public
+      # `django` est sur DEUX reseaux, donc son nom resout vers DEUX adresses :
+      # une sur traefik-public, une sur guiss-internal. Le client HTTP de Node
+      # (undici) essaie l'une puis l'autre — et attendait indefiniment quand il
+      # tombait sur celle de guiss-internal, injoignable d'ici.
+      #
+      # Symptome trompeur : par IP directe la requete aboutissait (400), par nom
+      # elle expirait (UND_ERR_CONNECT_TIMEOUT). Le DNS etait pourtant correct.
+      #
+      # En rejoignant ce reseau, les DEUX adresses deviennent joignables. Au
+      # passage, l'appel serveur-a-serveur quitte le reseau mutualise du serveur
+      # pour le reseau prive du projet.
+      - guiss-internal
     labels:
       - "traefik.enable=true"
+      # `nextjs` etant desormais sur deux reseaux, cette etiquette n'est plus
+      # decorative : elle fixe celui que Traefik doit emprunter.
       - "traefik.docker.network=traefik-public"
       - "traefik.http.routers.guiss-web.rule=Host(`guiss.kamalfils.app`)"
       - "traefik.http.routers.guiss-web.entrypoints=websecure"
