@@ -257,6 +257,8 @@ services:
   # INTERNE UNIQUEMENT — PHI (données de santé). Jamais exposé à Traefik.
   # ===========================================================================
   hapi-db:
+    # Désactivé par défaut (FHIR_ENABLED=False, serveur 2 Go) : `--profile fhir` pour le lancer.
+    profiles: ["fhir"]
     image: postgres:17-alpine
     container_name: guiss_hapi_db
     restart: unless-stopped
@@ -282,6 +284,8 @@ services:
   # JVM bridée (serveur staging mutualisé) : heap 384 Mo max, mem_limit 768 Mo.
   # ===========================================================================
   hapi:
+    # Désactivé par défaut (FHIR_ENABLED=False, serveur 2 Go) : `--profile fhir` pour le lancer.
+    profiles: ["fhir"]
     image: hapiproject/hapi:v7.4.0
     container_name: guiss_hapi
     restart: unless-stopped
