@@ -97,7 +97,7 @@ services:
   #   Console  -> bucket.kamalfils.app  (port 9001)  UI d'administration
   # ===========================================================================
   minio:
-    image: minio/minio:latest
+    image: quay.io/minio/minio:latest
     container_name: minio
     restart: unless-stopped
     command: server /data --console-address ":9001"
