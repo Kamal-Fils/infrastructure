@@ -213,7 +213,10 @@ services:
   # PostgreSQL — base principale Django. Interne, pas de port mappé sur l'hôte.
   # ===========================================================================
   db:
-    image: postgres:17-alpine
+    # Épinglé par digest : `deploy` fait `pull` + `up -d` sur toute la
+    # stack, donc un tag flottant fait redémarrer ce service pendant le
+    # déploiement d'une APPLICATION. Mettre à jour = changer ce digest.
+    image: postgres:17-alpine@sha256:f02121de6f74d30d8a94cd1d9584125e2178d7e6c377d8130112d4e52d867995
     container_name: guiss_db
     restart: unless-stopped
     environment:
@@ -238,7 +241,10 @@ services:
   # Protégé par mot de passe (REDIS_PASSWORD).
   # ===========================================================================
   redis:
-    image: redis:7-alpine
+    # Épinglé par digest : `deploy` fait `pull` + `up -d` sur toute la
+    # stack, donc un tag flottant fait redémarrer ce service pendant le
+    # déploiement d'une APPLICATION. Mettre à jour = changer ce digest.
+    image: redis:7-alpine@sha256:520775a41a63e77e06c73e35d2fd9cc15921a609516818796b4ecbb813078bc7
     container_name: guiss_redis
     restart: unless-stopped
     command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
@@ -259,7 +265,10 @@ services:
   hapi-db:
     # Désactivé par défaut (FHIR_ENABLED=False, serveur 2 Go) : `--profile fhir` pour le lancer.
     profiles: ["fhir"]
-    image: postgres:17-alpine
+    # Épinglé par digest : `deploy` fait `pull` + `up -d` sur toute la
+    # stack, donc un tag flottant fait redémarrer ce service pendant le
+    # déploiement d'une APPLICATION. Mettre à jour = changer ce digest.
+    image: postgres:17-alpine@sha256:f02121de6f74d30d8a94cd1d9584125e2178d7e6c377d8130112d4e52d867995
     container_name: guiss_hapi_db
     restart: unless-stopped
     mem_limit: 256m
@@ -321,7 +330,10 @@ services:
   # Même stratégie que Sen'Afrik1 : boucle pg_dump compressé + rétention.
   # ===========================================================================
   backup:
-    image: postgres:17-alpine
+    # Épinglé par digest : `deploy` fait `pull` + `up -d` sur toute la
+    # stack, donc un tag flottant fait redémarrer ce service pendant le
+    # déploiement d'une APPLICATION. Mettre à jour = changer ce digest.
+    image: postgres:17-alpine@sha256:f02121de6f74d30d8a94cd1d9584125e2178d7e6c377d8130112d4e52d867995
     container_name: guiss_backup
     restart: unless-stopped
     env_file:

@@ -235,7 +235,10 @@ services:
   # 1536-dim dans apps/search). Interne, pas de port mappé sur l'hôte.
   # ===========================================================================
   db:
-    image: pgvector/pgvector:pg17
+    # Épinglé par digest : `deploy` fait `pull` + `up -d` sur toute la
+    # stack, donc un tag flottant fait redémarrer ce service pendant le
+    # déploiement d'une APPLICATION. Mettre à jour = changer ce digest.
+    image: pgvector/pgvector:pg17@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f
     container_name: jaaykoo_db
     restart: unless-stopped
     environment:
@@ -260,7 +263,10 @@ services:
   # Protégé par mot de passe (REDIS_PASSWORD). Le broker Celery est RabbitMQ.
   # ===========================================================================
   redis:
-    image: redis:7-alpine
+    # Épinglé par digest : `deploy` fait `pull` + `up -d` sur toute la
+    # stack, donc un tag flottant fait redémarrer ce service pendant le
+    # déploiement d'une APPLICATION. Mettre à jour = changer ce digest.
+    image: redis:7-alpine@sha256:520775a41a63e77e06c73e35d2fd9cc15921a609516818796b4ecbb813078bc7
     container_name: jaaykoo_redis
     restart: unless-stopped
     command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
@@ -281,7 +287,10 @@ services:
   # Console de management NON exposée (interne uniquement).
   # ===========================================================================
   rabbitmq:
-    image: rabbitmq:4-management-alpine
+    # Épinglé par digest : `deploy` fait `pull` + `up -d` sur toute la
+    # stack, donc un tag flottant fait redémarrer ce service pendant le
+    # déploiement d'une APPLICATION. Mettre à jour = changer ce digest.
+    image: rabbitmq:4-management-alpine@sha256:b839b492a91788a1d9406ef3ec0e1d8a8448032c48148a54a9e0c68ed66cde9b
     container_name: jaaykoo_rabbitmq
     restart: unless-stopped
     environment:
@@ -307,7 +316,10 @@ services:
   # Même stratégie que Guiss/Sen'Afrik1 : boucle pg_dump compressé + rétention.
   # ===========================================================================
   backup:
-    image: pgvector/pgvector:pg17
+    # Épinglé par digest : `deploy` fait `pull` + `up -d` sur toute la
+    # stack, donc un tag flottant fait redémarrer ce service pendant le
+    # déploiement d'une APPLICATION. Mettre à jour = changer ce digest.
+    image: pgvector/pgvector:pg17@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f
     container_name: jaaykoo_backup
     restart: unless-stopped
     env_file:
