@@ -130,7 +130,10 @@ services:
   # PostgreSQL + pgvector — interne, pas de port mappé sur l'hôte
   # ===========================================================================
   db:
-    image: pgvector/pgvector:pg17
+    # Épinglé par digest : `deploy` fait `pull` + `up -d` sur toute la
+    # stack, donc un tag flottant fait redémarrer ce service pendant le
+    # déploiement d'une APPLICATION. Mettre à jour = changer ce digest.
+    image: pgvector/pgvector:pg17@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f
     container_name: jangubi_db
     restart: unless-stopped
     environment:
@@ -151,7 +154,10 @@ services:
   # Redis — cache Django + Channel Layers (WebSocket)
   # ===========================================================================
   redis:
-    image: redis:7-alpine
+    # Épinglé par digest : `deploy` fait `pull` + `up -d` sur toute la
+    # stack, donc un tag flottant fait redémarrer ce service pendant le
+    # déploiement d'une APPLICATION. Mettre à jour = changer ce digest.
+    image: redis:7-alpine@sha256:520775a41a63e77e06c73e35d2fd9cc15921a609516818796b4ecbb813078bc7
     container_name: jangubi_redis
     restart: unless-stopped
     command: redis-server --appendonly yes
@@ -169,7 +175,10 @@ services:
   # RabbitMQ — broker Celery
   # ===========================================================================
   rabbitmq:
-    image: rabbitmq:3.13-management-alpine
+    # Épinglé par digest : `deploy` fait `pull` + `up -d` sur toute la
+    # stack, donc un tag flottant fait redémarrer ce service pendant le
+    # déploiement d'une APPLICATION. Mettre à jour = changer ce digest.
+    image: rabbitmq:3.13-management-alpine@sha256:606d8c0d6b3c18d1da9afc53bc7cdb2a8d5486df91b5a9830e9e07626c9ae281
     container_name: jangubi_rabbitmq
     restart: unless-stopped
     environment:
